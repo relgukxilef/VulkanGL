@@ -1,0 +1,13 @@
+*.*
+!*.*/
+build
+
+!.gitignore
+
+!*.txt
+!*.yml
+!*.md
+!*.json
+
+!*.cpp
+!*.h
