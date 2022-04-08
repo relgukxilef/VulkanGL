@@ -3,6 +3,7 @@
 build
 
 !.gitignore
+!.gitsubmodules
 
 !*.txt
 !*.yml

@@ -1,3 +1,4 @@
 [submodule "submodules/Vulkan-Headers"]
 	path = submodules/Vulkan-Headers
-	url = https://github.com/KhronosGroup/Vulkan-Headers
+    url = https://github.com/KhronosGroup/Vulkan-Headers
+	shallow = true
