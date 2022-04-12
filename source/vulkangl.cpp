@@ -1,13 +1,11 @@
-#include <vulkan/vulkan.h>
+#include "vulkangl/vulkangl.h"
 
-#include <iostream>
+struct VkInstance_T {} global_instance;
 
-#include <GLES2/gl2.h>
+VkInstance vglCreateInstanceForGL() {
+    return &global_instance;
+}
 
-VKAPI_ATTR void VKAPI_CALL
-vkDestroySurfaceKHR(
-    VkInstance instance, VkSurfaceKHR surface,
-    const VkAllocationCallbacks *pAllocator
-) {
-    std::cout << "vkDestroySurfaceKHR" << std::endl;
+VkSurfaceKHR vglCreateSurfaceForGL() {
+    return 1;
 }
