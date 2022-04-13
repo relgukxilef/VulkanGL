@@ -7,6 +7,6 @@ add_library(
 )
 
 target_link_libraries(
-    vulkangl INTERFACE
+    vulkangl PUBLIC
     Vulkan-Headers
 )
