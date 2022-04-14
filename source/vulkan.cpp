@@ -16,10 +16,10 @@ vkEnumeratePhysicalDevices(
     VkInstance instance, uint32_t *pPhysicalDeviceCount,
     VkPhysicalDevice *pPhysicalDevices
 ) {
-    *pPhysicalDeviceCount = 1;
-    if (pPhysicalDevices) {
+    if (pPhysicalDevices && *pPhysicalDeviceCount >= 1) {
         pPhysicalDevices[0] = &global_device;
     } 
+    *pPhysicalDeviceCount = 1;
     return VK_SUCCESS;
 }
 
@@ -28,8 +28,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(
     uint32_t* pQueueFamilyPropertyCount,
     VkQueueFamilyProperties* pQueueFamilyProperties
 ) {
-    *pQueueFamilyPropertyCount = 1;
-    if (pQueueFamilyProperties) {
+    if (pQueueFamilyProperties && *pQueueFamilyPropertyCount >= 1) {
         pQueueFamilyProperties[0] = {
             .queueFlags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
             .queueCount = 1,
@@ -37,6 +36,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceQueueFamilyProperties(
             .minImageTransferGranularity = {1, 1, 1}
         };
     }
+    *pQueueFamilyPropertyCount = 1;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
