@@ -2,7 +2,8 @@
 
 #include <GLES2/gl2.h>
 
-struct VkPhysicalDevice_T {} global_device;
+struct VkPhysicalDevice_T {} global_physical_device;
+struct VkDevice_T {} global_device;
 
 VKAPI_ATTR void VKAPI_CALL
 vkDestroySurfaceKHR(
@@ -17,7 +18,7 @@ vkEnumeratePhysicalDevices(
     VkPhysicalDevice *pPhysicalDevices
 ) {
     if (pPhysicalDevices && *pPhysicalDeviceCount >= 1) {
-        pPhysicalDevices[0] = &global_device;
+        pPhysicalDevices[0] = &global_physical_device;
     } 
     *pPhysicalDeviceCount = 1;
     return VK_SUCCESS;
@@ -47,4 +48,20 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
 ) {
     *pSupported = VK_TRUE;
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
+    VkPhysicalDevice physicalDevice,
+    const VkDeviceCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDevice* pDevice
+) {
+    *pDevice = &global_device;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(
+    VkDevice device,
+    const VkAllocationCallbacks* pAllocator
+) {
 }
