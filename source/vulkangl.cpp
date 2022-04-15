@@ -8,5 +8,5 @@ VkInstance vglCreateInstanceForGL() {
 }
 
 VkSurfaceKHR vglCreateSurfaceForGL() {
-    return &global_surface;
+    return (VkSurfaceKHR)&global_surface;
 }

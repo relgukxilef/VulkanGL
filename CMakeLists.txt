@@ -10,9 +10,4 @@ target_include_directories(
     include
 )
 
-target_compile_definitions(
-    vulkangl PUBLIC 
-    VK_USE_64_BIT_PTR_DEFINES
-)
-
 target_compile_features(vulkangl PRIVATE cxx_std_11)
