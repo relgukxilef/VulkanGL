@@ -1,9 +1,14 @@
 #include <vulkan/vulkan.h>
 
+#include <vulkan/vulkan_core.h>
+
 #include <GLES2/gl2.h>
 
 struct VkPhysicalDevice_T {} global_physical_device;
-struct VkDevice_T {} global_device;
+
+struct VkDevice_T {};
+struct VkCommandPool_T {};
+struct VkQueue_T {} global_queue;
 
 VKAPI_ATTR void VKAPI_CALL
 vkDestroySurfaceKHR(
@@ -56,7 +61,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     const VkAllocationCallbacks* pAllocator,
     VkDevice* pDevice
 ) {
-    *pDevice = &global_device;
+    *pDevice = new VkDevice_T;
     return VK_SUCCESS;
 }
 
@@ -64,4 +69,61 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(
     VkDevice device,
     const VkAllocationCallbacks* pAllocator
 ) {
+    delete device;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(
+    VkDevice device,
+    const VkCommandPoolCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkCommandPool* pCommandPool
+) {
+    *pCommandPool = (VkCommandPool)new VkCommandPool_T;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyCommandPool(
+    VkDevice device,
+    VkCommandPool commandPool,
+    const VkAllocationCallbacks* pAllocator
+) {
+    delete (VkCommandPool_T*)commandPool;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(
+    VkDevice device,
+    uint32_t queueFamilyIndex,
+    uint32_t queueIndex,
+    VkQueue* pQueue
+) {
+    *pQueue = &global_queue;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    uint32_t* pSurfaceFormatCount,
+    VkSurfaceFormatKHR* pSurfaceFormats
+) {
+    if (pSurfaceFormats && *pSurfaceFormatCount >= 1) {
+        pSurfaceFormats[0] = {
+            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .colorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR
+        };
+    }
+    *pSurfaceFormatCount = 1;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
+    VkPhysicalDevice physicalDevice,
+    VkSurfaceKHR surface,
+    uint32_t* pPresentModeCount,
+    VkPresentModeKHR* pPresentModes
+) {
+    if (pPresentModes && *pPresentModeCount >= 1) {
+        pPresentModes[0] = VK_PRESENT_MODE_FIFO_KHR;
+    }
+    *pPresentModeCount = 1;
+    return VK_SUCCESS;
 }
