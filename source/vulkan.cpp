@@ -2,11 +2,21 @@
 
 #include <algorithm>
 #include <chrono>
+#include <tuple>
 
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 
 #include "globals.h"
+#include "vulkan/vulkan_core.h"
+
+auto tie(const VkExtent2D& extent) {
+    return std::tie(extent.height, extent.width);
+}
+
+bool operator==(const VkExtent2D &a, const VkExtent2D &b) {
+    return tie(a) == tie(b);
+}
 
 struct VkPhysicalDevice_T {} global_physical_device;
 
@@ -14,7 +24,9 @@ struct VkDevice_T {};
 struct VkCommandPool_T {};
 struct VkQueue_T {} global_queue;
 struct VkSemaphore_T {};
-struct VkSwapchainKHR_T {};
+struct VkSwapchainKHR_T {
+    VkExtent2D surface_extent;
+};
 struct VkDebugUtilsMessengerEXT_T {};
 struct VkImage_T {} default_image;
 
@@ -29,7 +41,7 @@ struct command {
 };
 
 template<class T>
-struct lambda_command : public command {
+struct lambda_command final : public command {
     lambda_command(T&& t) : t(t) {}
     void operator()() {
         t();
@@ -369,4 +381,60 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
         return (PFN_vkVoidFunction)vkDestroyDebugUtilsMessengerEXT;
     }
     return nullptr;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
+    VkDevice device,
+    VkSwapchainKHR swapchain,
+    uint64_t timeout,
+    VkSemaphore semaphore,
+    VkFence fence,
+    uint32_t* pImageIndex
+) {
+    *pImageIndex = 0;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(
+    VkQueue queue,
+    uint32_t submitCount,
+    const VkSubmitInfo* pSubmits,
+    VkFence fence
+) {
+    for (
+        const VkSubmitInfo* submit = pSubmits; submit != pSubmits + submitCount;
+        submit++
+    ) {
+        for (
+            const VkCommandBuffer* buffer = submit->pCommandBuffers; 
+            buffer != submit->pCommandBuffers + submit->commandBufferCount;
+            buffer++
+        ) {
+            // TODO: handle semaphores and fences
+            (*(*buffer)->first)();
+        }
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
+    VkQueue queue,
+    const VkPresentInfoKHR* pPresentInfo
+) {
+    // TODO: handle semaphores
+    // TODO: handle resize
+    if (current_surface_extent == 
+        ((VkSwapchainKHR_T*)pPresentInfo->pSwapchains[0])->surface_extent)
+        return VK_SUCCESS;
+    else
+        return VK_ERROR_OUT_OF_DATE_KHR;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(
+    VkDevice device,
+    uint32_t fenceCount,
+    const VkFence* pFences
+) {
+    // TODO
+    return VK_SUCCESS;
 }
