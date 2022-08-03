@@ -1,5 +1,6 @@
 #include <vulkan/vulkan.h>
 
+#include <memory>
 #include <algorithm>
 #include <chrono>
 #include <tuple>
@@ -14,14 +15,16 @@ auto tie(const VkExtent2D& extent) {
     return std::tie(extent.height, extent.width);
 }
 
-bool operator==(const VkExtent2D &a, const VkExtent2D &b) {
+bool operator==(const VkExtent2D& a, const VkExtent2D& b) {
     return tie(a) == tie(b);
 }
 
 struct VkPhysicalDevice_T {} global_physical_device;
 
 struct VkDevice_T {};
-struct VkCommandPool_T {};
+struct VkCommandPool_T {
+    std::unique_ptr<struct VkCommandBuffer_T> buffers;
+};
 struct VkQueue_T {} global_queue;
 struct VkSemaphore_T {};
 struct VkSwapchainKHR_T {
@@ -35,15 +38,15 @@ struct VkFence_T {
 };
 
 struct command {
-    virtual ~command();
-    virtual void operator()();
-    command* next;
+    virtual ~command() {};
+    virtual void operator()() const = 0;
+    std::unique_ptr<command> next;
 };
 
 template<class T>
 struct lambda_command final : public command {
     lambda_command(T&& t) : t(t) {}
-    void operator()() {
+    void operator()() const override {
         t();
         (*next)();
     }
@@ -51,7 +54,7 @@ struct lambda_command final : public command {
 };
 
 struct stop_command : public command {
-    void operator()() {}
+    void operator()() const override {}
 };
 
 
@@ -60,26 +63,27 @@ struct VkPipeline_T {
 };
 
 struct VkCommandBuffer_T {
-    VkPipeline_T* graphics_pipeline;
+    const VkPipeline_T* graphics_pipeline;
+    std::unique_ptr<VkCommandBuffer_T> buffer_next;
 
     struct {
         unsigned program;
     } gl_state;
 
-    command* first, ** next = &first;
+    std::unique_ptr<command> first, * next = &first;
 };
 
 VKAPI_ATTR void VKAPI_CALL
 vkDestroySurfaceKHR(
     VkInstance instance, VkSurfaceKHR surface,
-    const VkAllocationCallbacks *pAllocator
+    const VkAllocationCallbacks* pAllocator
 ) {
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
 vkEnumeratePhysicalDevices(
-    VkInstance instance, uint32_t *pPhysicalDeviceCount,
-    VkPhysicalDevice *pPhysicalDevices
+    VkInstance instance, uint32_t* pPhysicalDeviceCount,
+    VkPhysicalDevice* pPhysicalDevices
 ) {
     if (pPhysicalDevices && *pPhysicalDeviceCount >= 1) {
         pPhysicalDevices[0] = &global_physical_device;
@@ -194,7 +198,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(
     VkCommandBuffer* pCommandBuffers
 ) {
     for (unsigned i = 0; i < pAllocateInfo->commandBufferCount; ++i) {
-        pCommandBuffers[i] = new VkCommandBuffer_T;
+        auto buffer = std::make_unique<VkCommandBuffer_T>();
+        buffer->buffer_next = 
+            std::move(((VkCommandPool_T*)pAllocateInfo->commandPool)->buffers);
+        pCommandBuffers[i] = buffer.get();
+        ((VkCommandPool_T*)pAllocateInfo->commandPool)->buffers = 
+            std::move(buffer);
     }
     return VK_SUCCESS;
 }
@@ -209,6 +218,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBeginCommandBuffer(
 VKAPI_ATTR VkResult VKAPI_CALL vkEndCommandBuffer(
     VkCommandBuffer commandBuffer
 ) {
+    *commandBuffer->next = std::make_unique<stop_command>();
+    commandBuffer->next = &(**commandBuffer->next).next;
     return VK_SUCCESS;
 }
 
@@ -300,7 +311,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     const VkAllocationCallbacks* pAllocator,
     VkSwapchainKHR* pSwapchain
 ) {
-    *pSwapchain = (VkSwapchainKHR)new VkSwapchainKHR_T;
+    *pSwapchain = (VkSwapchainKHR)new VkSwapchainKHR_T{
+        .surface_extent = current_surface_extent
+    };
     return VK_SUCCESS;
 }
 
