@@ -1,40 +1,57 @@
+#include <cstdint>
+#include <sys/types.h>
 #include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
 #include <memory>
 #include <algorithm>
 #include <chrono>
 #include <tuple>
+#include <cstdio>
 
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
+#include <GLES3/gl3.h>
 
 #include "globals.h"
-#include "vulkan/vulkan_core.h"
+#include "enumerates.h"
 
-auto tie(const VkExtent2D& extent) {
-    return std::tie(extent.height, extent.width);
-}
-
-bool operator==(const VkExtent2D& a, const VkExtent2D& b) {
-    return tie(a) == tie(b);
-}
+// TODO: move structs to header file
+// TODO: move globals to namespace
 
 struct VkPhysicalDevice_T {} global_physical_device;
 
-struct VkDevice_T {};
+struct VkDevice_T {
+    GLuint copy_framebuffer;
+} * global_device;
 struct VkCommandPool_T {
     std::unique_ptr<struct VkCommandBuffer_T> buffers;
 };
 struct VkQueue_T {} global_queue;
 struct VkSemaphore_T {};
+struct VkImage_T {
+    GLuint name;
+    GLenum internal_format;
+    GLsizei width, height, depth;
+    GLsizei levels;
+};
 struct VkSwapchainKHR_T {
-    VkExtent2D surface_extent;
+    VkImage_T image;
 };
 struct VkDebugUtilsMessengerEXT_T {};
-struct VkImage_T {} default_image;
 
 struct VkFence_T {
     GLsync sync;
+};
+
+struct VkImageView_T {
+    VkImage_T* image;
+    VkImageSubresourceRange subresource_range;
+};
+
+struct VkFramebuffer_T {
+    GLuint name;
+};
+
+struct VkRenderPass_T {
 };
 
 struct command {
@@ -67,11 +84,21 @@ struct VkCommandBuffer_T {
     std::unique_ptr<VkCommandBuffer_T> buffer_next;
 
     struct {
-        unsigned program;
+        GLuint program;
+        GLuint draw_framebuffer;
+        GLuint read_framebuffer;
     } gl_state;
 
     std::unique_ptr<command> first, * next = &first;
 };
+
+template<class T>
+void add_commmand(
+    VkCommandBuffer commandBuffer, T&& functor
+) {
+    commandBuffer->next->reset(new lambda_command<T>(std::move(functor)));
+    commandBuffer->next = &(*commandBuffer->next)->next;
+}
 
 VKAPI_ATTR void VKAPI_CALL
 vkDestroySurfaceKHR(
@@ -126,6 +153,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     VkDevice* pDevice
 ) {
     *pDevice = new VkDevice_T;
+    global_device = *pDevice;
+    glGenFramebuffers(1, &(*pDevice)->copy_framebuffer);
     return VK_SUCCESS;
 }
 
@@ -133,7 +162,152 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(
     VkDevice device,
     const VkAllocationCallbacks* pAllocator
 ) {
+    global_device = nullptr;
     delete device;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
+    VkDevice device,
+    const VkImageCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkImage* pImage
+) {
+    auto internal = new VkImage_T;
+    glGenTextures(1, &internal->name);
+    if (pCreateInfo->extent.depth == 1 && pCreateInfo->arrayLayers == 1) {
+        glBindTexture(GL_TEXTURE_2D, internal->name);
+        glTexStorage2D(
+            GL_TEXTURE_2D, pCreateInfo->mipLevels, 
+            gl_internal_format(pCreateInfo->format), 
+            pCreateInfo->extent.width, pCreateInfo->extent.height
+        );
+    } else if (pCreateInfo->arrayLayers == 1) {
+        glBindTexture(GL_TEXTURE_3D, internal->name);
+        glTexStorage3D(
+            GL_TEXTURE_3D, pCreateInfo->mipLevels, 
+            gl_internal_format(pCreateInfo->format), 
+            pCreateInfo->extent.width, pCreateInfo->extent.height, 
+            pCreateInfo->extent.depth
+        );
+    } else {
+        assert(false);
+    }
+    *pImage = (VkImage)internal;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyImage(
+    VkDevice device,
+    VkImage image,
+    const VkAllocationCallbacks* pAllocator
+) {
+    auto internal = (VkImage_T*)image;
+    glDeleteTextures(1, &internal->name);
+    delete internal;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateImageView(
+    VkDevice device,
+    const VkImageViewCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkImageView* pView
+) {
+    // TODO
+    VkImageView_T* image_view = new VkImageView_T{
+        .image = (VkImage_T*)pCreateInfo->image,
+    };
+    *pView = (VkImageView)image_view;
+    
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyImageView(
+    VkDevice device,
+    VkImageView imageView,
+    const VkAllocationCallbacks* pAllocator
+) {
+    VkImageView_T* internal_image_view = (VkImageView_T*)imageView;
+    delete internal_image_view;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
+    VkDevice device,
+    const VkFramebufferCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkFramebuffer* pFramebuffer
+) {
+    auto framebuffer = new VkFramebuffer_T;
+    // TODO: check whether this framebuffer is equivalent to framebuffer 0
+    glGenFramebuffers(1, &framebuffer->name);
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer->name);
+
+    for (auto i = 0; i < pCreateInfo->attachmentCount; i++) {
+        glBindTexture(
+            GL_TEXTURE_2D, 
+            ((VkImageView_T*)pCreateInfo->pAttachments[i])->image->name
+        );
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, 	GL_TEXTURE_2D,
+            ((VkImageView_T*)pCreateInfo->pAttachments[i])->image->name, 0
+        );
+    }
+
+    auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status == GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT) {
+        throw std::runtime_error("Framebuffer has incomplete attachment");
+    } else if (status == GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT) {
+        throw std::runtime_error(
+            "Framebuffer needs at least one attachment"
+        );
+    } else if (status == GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE) {
+        throw std::runtime_error(
+            "Framebuffer attachments must have same number and "
+            "location of samples"
+        );
+    } else if (status == GL_FRAMEBUFFER_UNSUPPORTED) {
+        throw std::runtime_error(
+            "Framebuffer internal format not supported"
+        );
+    } else if (status == GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS) {
+        throw std::runtime_error(
+            "All attached images much have the same width and height."
+        );
+    } else if (status != GL_FRAMEBUFFER_COMPLETE) {
+        throw std::runtime_error(
+            "Framebuffer is incomplete for unknown reason"
+        );
+    }
+
+    *pFramebuffer = (VkFramebuffer)framebuffer;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyFramebuffer(
+    VkDevice device,
+    VkFramebuffer framebuffer,
+    const VkAllocationCallbacks* pAllocator
+) {
+    VkFramebuffer_T* internal_framebuffer = (VkFramebuffer_T*)framebuffer;
+    if (internal_framebuffer->name != 0)
+        glDeleteFramebuffers(1, &internal_framebuffer->name);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
+    VkDevice device,
+    const VkRenderPassCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkRenderPass* pRenderPass
+) {
+    *pRenderPass = (VkFramebuffer)new VkRenderPass_T;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyRenderPass(
+    VkDevice device,
+    VkRenderPass renderPass,
+    const VkAllocationCallbacks* pAllocator
+) {
+    delete (VkFramebuffer_T*)renderPass;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(
@@ -171,7 +345,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(
 ) {
     if (pSurfaceFormats && *pSurfaceFormatCount >= 1) {
         pSurfaceFormats[0] = {
-            .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .format = VK_FORMAT_R8G8B8_UNORM,
             .colorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR
         };
     }
@@ -236,6 +410,32 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
     const VkImageMemoryBarrier* pImageMemoryBarriers
 ) {
 
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
+    VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo* pRenderPassBegin,
+    VkSubpassContents contents
+) {
+    GLuint framebuffer = 
+        ((VkFramebuffer_T*)pRenderPassBegin->framebuffer)->name;
+    if (commandBuffer->gl_state.draw_framebuffer != framebuffer) {
+        auto color = pRenderPassBegin->pClearValues->color;
+        add_commmand(commandBuffer, [framebuffer, color](){ 
+            glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+            glClearColor(
+                color.float32[0], color.float32[1], 
+                color.float32[2], color.float32[3]
+            );
+            glClear(GL_COLOR_BUFFER_BIT);
+        });
+        commandBuffer->gl_state.draw_framebuffer = framebuffer;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(
+    VkCommandBuffer commandBuffer
+) {
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateFence(
@@ -311,8 +511,22 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     const VkAllocationCallbacks* pAllocator,
     VkSwapchainKHR* pSwapchain
 ) {
+    GLuint name;
+    glGenTextures(1, &name);
+    glBindTexture(GL_TEXTURE_2D, name);
+    glTexStorage2D(
+        GL_TEXTURE_2D, 1, 
+        GL_RGB8, 
+        pCreateInfo->imageExtent.width, pCreateInfo->imageExtent.height
+    );
     *pSwapchain = (VkSwapchainKHR)new VkSwapchainKHR_T{
-        .surface_extent = current_surface_extent
+        .image = {
+            .name = name,
+            .internal_format = gl_internal_format(pCreateInfo->imageFormat),
+            .width = current_surface_extent.width,
+            .height = current_surface_extent.height,
+            .depth = 1,
+        }
     };
     return VK_SUCCESS;
 }
@@ -322,7 +536,9 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySwapchainKHR(
     VkSwapchainKHR swapchain,
     const VkAllocationCallbacks* pAllocator
 ) {
-    delete (VkSwapchainKHR_T*)swapchain;
+    auto internal = (VkSwapchainKHR_T*)swapchain;
+    glDeleteTextures(1, &internal->image.name);
+    delete internal;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainImagesKHR(
@@ -332,7 +548,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainImagesKHR(
     VkImage* pSwapchainImages
 ) {
     if (pSwapchainImages && *pSwapchainImageCount >= 1) {
-        pSwapchainImages[0] = (VkImage)&default_image;
+        pSwapchainImages[0] = (VkImage)&((VkSwapchainKHR_T*)swapchain)->image;
     }
     *pSwapchainImageCount = 1;
     return VK_SUCCESS;
@@ -346,7 +562,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     *pSurfaceCapabilities = {
         .minImageCount = 1,
         .maxImageCount = 1,
-        .currentExtent = current_surface_extent,
+        .currentExtent = { 
+            .width = (uint32_t)current_surface_extent.width, 
+            .height = (uint32_t)current_surface_extent.height 
+        },
         .minImageExtent = {
             .width = 1,
             .height = 1
@@ -404,8 +623,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     VkFence fence,
     uint32_t* pImageIndex
 ) {
-    *pImageIndex = 0;
-    return VK_SUCCESS;
+    auto internal_swapchain = (VkSwapchainKHR_T*)swapchain;
+    if (
+        internal_swapchain->image.width == current_surface_extent.width &&
+        internal_swapchain->image.height == current_surface_extent.height
+    ) {
+        *pImageIndex = 0;
+        return VK_SUCCESS;
+
+    } else {
+        return VK_ERROR_OUT_OF_DATE_KHR;
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(
@@ -435,12 +663,35 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
     const VkPresentInfoKHR* pPresentInfo
 ) {
     // TODO: handle semaphores
-    // TODO: handle resize
-    if (current_surface_extent == 
-        ((VkSwapchainKHR_T*)pPresentInfo->pSwapchains[0])->surface_extent)
-        return VK_SUCCESS;
-    else
-        return VK_ERROR_OUT_OF_DATE_KHR;
+    // TODO: handle multiple swapchains?
+    if (pPresentInfo->swapchainCount > 0) {
+        auto image = ((VkSwapchainKHR_T*)pPresentInfo->pSwapchains[0])->image;
+        if (
+            current_surface_extent.width == image.width && 
+            current_surface_extent.height == image.height
+        ) {
+            // TODO: optimize away copy
+            glBindFramebuffer(
+                GL_READ_FRAMEBUFFER, global_device->copy_framebuffer
+            );
+            glFramebufferTexture2D(
+                GL_READ_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                image.name, 0
+            );
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+            glBlitFramebuffer(
+                0, 0, image.width, image.height, 
+                0, 0, image.width, image.height, 
+                GL_COLOR_BUFFER_BIT, GL_NEAREST
+            );
+            return VK_SUCCESS;
+        
+        } else {
+            // TODO: can resize during rendering even happen?
+            return VK_ERROR_OUT_OF_DATE_KHR;
+        }
+    }
+    return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(

@@ -14,5 +14,8 @@ VkSurfaceKHR vglCreateSurfaceForGL() {
 }
 
 void vglSetCurrentSurfaceExtent(VkExtent2D extent) {
-    current_surface_extent = extent;
+    current_surface_extent = { 
+        (GLsizei)extent.width, 
+        (GLsizei)extent.height 
+    };
 }

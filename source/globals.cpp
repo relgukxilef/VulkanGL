@@ -1,3 +1,3 @@
 #include "globals.h"
 
-VkExtent2D current_surface_extent;
+gl_extent_2d current_surface_extent;
