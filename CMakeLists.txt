@@ -10,4 +10,4 @@ target_include_directories(
     include
 )
 
-target_compile_features(vulkangl PRIVATE cxx_std_11)
+target_compile_features(vulkangl PRIVATE cxx_std_20)

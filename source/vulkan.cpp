@@ -8,6 +8,7 @@
 #include <chrono>
 #include <tuple>
 #include <cstdio>
+#include <cstring>
 
 #include <GLES3/gl3.h>
 
@@ -254,28 +255,24 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
 
     auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if (status == GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT) {
-        throw std::runtime_error("Framebuffer has incomplete attachment");
+        fprintf(stderr, "Framebuffer has incomplete attachment");
     } else if (status == GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT) {
-        throw std::runtime_error(
-            "Framebuffer needs at least one attachment"
-        );
+        fprintf(stderr, "Framebuffer needs at least one attachment");
     } else if (status == GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE) {
-        throw std::runtime_error(
+        fprintf(
+            stderr,
             "Framebuffer attachments must have same number and "
             "location of samples"
         );
     } else if (status == GL_FRAMEBUFFER_UNSUPPORTED) {
-        throw std::runtime_error(
-            "Framebuffer internal format not supported"
-        );
+        fprintf(stderr, "Framebuffer internal format not supported");
     } else if (status == GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS) {
-        throw std::runtime_error(
+        fprintf(
+            stderr,
             "All attached images much have the same width and height."
         );
     } else if (status != GL_FRAMEBUFFER_COMPLETE) {
-        throw std::runtime_error(
-            "Framebuffer is incomplete for unknown reason"
-        );
+        fprintf(stderr, "Framebuffer is incomplete for unknown reason");
     }
 
     *pFramebuffer = (VkFramebuffer)framebuffer;
@@ -298,7 +295,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
     const VkAllocationCallbacks* pAllocator,
     VkRenderPass* pRenderPass
 ) {
-    *pRenderPass = (VkFramebuffer)new VkRenderPass_T;
+    *pRenderPass = (VkRenderPass)new VkRenderPass_T;
     return VK_SUCCESS;
 }
 
