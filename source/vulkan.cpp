@@ -251,9 +251,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
         pCreateInfo->pCode, pCreateInfo->codeSize / 4
     );
 
-    spirv_cross::CompilerGLSL::Options options;
-	options.version = 300; // nothing newer supported in WebGL
-	options.es = true;
+    spirv_cross::CompilerGLSL::Options options{
+        .version = 300, // nothing newer supported in WebGL
+        .es = true,
+        .vertex = {
+            .fixup_clipspace = true,
+            .flip_vert_y = true,
+        }
+    };
 	compiler.set_common_options(options);
     
     shader_module.glsl = compiler.compile();
@@ -850,7 +855,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
             glBlitFramebuffer(
                 0, 0, image.width, image.height, 
-                0, image.height, image.width, 0, // flip vertically 
+                0, 0, image.width, image.height,
                 GL_COLOR_BUFFER_BIT, GL_NEAREST
             );
             return VK_SUCCESS;
