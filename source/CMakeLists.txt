@@ -5,9 +5,11 @@ add_library(
     vulkangl.cpp
     vulkan.cpp
     globals.h globals.cpp
+    enumerates.h enumerates.cpp
 )
 
 target_link_libraries(
     vulkangl PUBLIC
     Vulkan-Headers
+    spirv-cross-glsl
 )

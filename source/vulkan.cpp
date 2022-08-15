@@ -9,8 +9,10 @@
 #include <tuple>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include <GLES3/gl3.h>
+#include <spirv_glsl.hpp>
 
 #include "globals.h"
 #include "enumerates.h"
@@ -46,6 +48,11 @@ struct VkFence_T {
 struct VkImageView_T {
     VkImage_T* image;
     VkImageSubresourceRange subresource_range;
+};
+
+struct VkShaderModule_T {
+    // shader
+    std::string glsl;
 };
 
 struct VkFramebuffer_T {
@@ -231,6 +238,96 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyImageView(
     delete internal_image_view;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
+    VkDevice device,
+    const VkShaderModuleCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkShaderModule* pShaderModule
+) {
+    // At this point the shader stage is not known
+    VkShaderModule_T shader_module;
+    
+    spirv_cross::CompilerGLSL compiler(
+        pCreateInfo->pCode, pCreateInfo->codeSize / 4
+    );
+
+    spirv_cross::CompilerGLSL::Options options;
+	options.version = 300; // nothing newer supported in WebGL
+	options.es = true;
+	compiler.set_common_options(options);
+    
+    shader_module.glsl = compiler.compile();
+
+    *pShaderModule = (VkShaderModule)new VkShaderModule_T(shader_module);
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyShaderModule(
+    VkDevice device,
+    VkShaderModule shaderModule,
+    const VkAllocationCallbacks* pAllocator
+) {
+    delete (VkShaderModule_T*)shaderModule;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    uint32_t createInfoCount,
+    const VkGraphicsPipelineCreateInfo* pCreateInfos,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipeline* pPipelines
+) {
+    for (int i = 0; i < createInfoCount; i++) {
+        auto create_info = pCreateInfos[i];
+
+        VkPipeline_T pipeline;
+        pipeline.program = glCreateProgram();
+
+        for (int j = 0; j < create_info.stageCount; j++) {
+            auto stage = create_info.pStages[j];
+            GLuint shader = glCreateShader(
+                gl_shader_type(stage.stage)
+            );
+            auto shader_module = (VkShaderModule_T*)stage.module;
+            const GLchar* source = shader_module->glsl.data();
+            const GLint length = shader_module->glsl.size();
+            glShaderSource(shader, 1, &source, &length);
+            glCompileShader(shader);
+            glAttachShader(pipeline.program, shader);
+        }
+        glLinkProgram(pipeline.program);
+        pPipelines[i] = (VkPipeline)new VkPipeline_T(pipeline);
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyPipeline(
+    VkDevice device,
+    VkPipeline pipeline,
+    const VkAllocationCallbacks* pAllocator
+) {
+    glDeleteProgram(((VkPipeline_T*)pipeline)->program);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineLayout(
+    VkDevice device,
+    const VkPipelineLayoutCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipelineLayout* pPipelineLayout
+) {
+    // TODO
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyPipelineLayout(
+    VkDevice device,
+    VkPipelineLayout pipelineLayout,
+    const VkAllocationCallbacks* pAllocator
+) {
+    // TODO
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
     VkDevice device,
     const VkFramebufferCreateInfo* pCreateInfo,
@@ -394,6 +491,71 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEndCommandBuffer(
     return VK_SUCCESS;
 }
 
+VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
+    VkCommandBuffer commandBuffer,
+    VkPipelineBindPoint pipelineBindPoint,
+    VkPipeline pipeline
+) {
+    GLuint program = ((VkPipeline_T*)pipeline)->program;
+    if (commandBuffer->gl_state.program != program) {
+        add_commmand(commandBuffer, [=](){
+            glUseProgram(program);
+        });
+        commandBuffer->gl_state.program = program;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstViewport,
+    uint32_t viewportCount,
+    const VkViewport* pViewports
+) {
+    add_commmand(commandBuffer, [=](){
+        glViewport(
+            pViewports[0].x, pViewports[0].y, 
+            pViewports[0].width, pViewports[0].height
+        );
+        glDepthRangef(pViewports[0].minDepth, pViewports[0].maxDepth);
+    });
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstScissor,
+    uint32_t scissorCount,
+    const VkRect2D* pScissors
+) {
+    add_commmand(commandBuffer, [=](){
+        glScissor(
+            pScissors[0].offset.x, pScissors[0].offset.y, 
+            pScissors[0].extent.width, pScissors[0].extent.height
+        );
+    });
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
+    VkCommandBuffer commandBuffer,
+    uint32_t vertexCount,
+    uint32_t instanceCount,
+    uint32_t firstVertex,
+    uint32_t firstInstance
+) {
+    if (instanceCount == 1) {
+        add_commmand(commandBuffer, [=](){
+            glDrawArrays(GL_TRIANGLES, firstVertex, vertexCount);
+        });
+    } else if (firstInstance == 0) {
+        add_commmand(commandBuffer, [=](){
+            glDrawArraysInstanced(
+                GL_TRIANGLES, firstVertex, vertexCount, instanceCount
+            );
+        });
+    } else {
+        // TODO
+    }
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
     VkCommandBuffer commandBuffer,
     VkPipelineStageFlags srcStageMask,
@@ -416,8 +578,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
 ) {
     GLuint framebuffer = 
         ((VkFramebuffer_T*)pRenderPassBegin->framebuffer)->name;
+    auto color = pRenderPassBegin->pClearValues->color;
+
     if (commandBuffer->gl_state.draw_framebuffer != framebuffer) {
-        auto color = pRenderPassBegin->pClearValues->color;
         add_commmand(commandBuffer, [framebuffer, color](){ 
             glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
             glClearColor(
@@ -427,6 +590,15 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
             glClear(GL_COLOR_BUFFER_BIT);
         });
         commandBuffer->gl_state.draw_framebuffer = framebuffer;
+
+    } else {
+        add_commmand(commandBuffer, [color](){ 
+            glClearColor(
+                color.float32[0], color.float32[1], 
+                color.float32[2], color.float32[3]
+            );
+            glClear(GL_COLOR_BUFFER_BIT);
+        });
     }
 }
 
@@ -678,7 +850,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
             glBlitFramebuffer(
                 0, 0, image.width, image.height, 
-                0, 0, image.width, image.height, 
+                0, image.height, image.width, 0, // flip vertically 
                 GL_COLOR_BUFFER_BIT, GL_NEAREST
             );
             return VK_SUCCESS;
