@@ -6,6 +6,7 @@ add_library(
     vulkan.cpp
     globals.h globals.cpp
     enumerates.h enumerates.cpp
+    egl.c gles2.c
 )
 
 target_link_libraries(

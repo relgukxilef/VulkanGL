@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include <GLES3/gl3.h>
+#include "glad/gles2.h"
 #include <spirv_glsl.hpp>
 
 #include "globals.h"
