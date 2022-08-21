@@ -7,3 +7,5 @@
 GLenum gl_internal_format(VkFormat format);
 
 GLenum gl_shader_type(VkShaderStageFlagBits);
+
+GLenum gl_primitive_type(VkPrimitiveTopology topology);

@@ -28,3 +28,15 @@ GLenum gl_shader_type(VkShaderStageFlagBits stage) {
         return GL_VERTEX_SHADER;
     }
 };
+
+GLenum gl_primitive_type(VkPrimitiveTopology topology) {
+    switch (topology) {
+    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+        return GL_TRIANGLES;
+    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+        return GL_TRIANGLE_STRIP;
+    default:
+        fprintf(stderr, "Unknown primitive topology %i\n", topology);
+        return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    }
+};

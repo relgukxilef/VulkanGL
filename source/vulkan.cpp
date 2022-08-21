@@ -9,6 +9,7 @@
 #include <tuple>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include <GLES3/gl3.h>
@@ -16,6 +17,7 @@
 
 #include "globals.h"
 #include "enumerates.h"
+#include "spirv.hpp"
 
 // TODO: move structs to header file
 // TODO: move globals to namespace
@@ -84,7 +86,8 @@ struct stop_command : public command {
 
 
 struct VkPipeline_T {
-    unsigned program;
+    GLuint program;
+    GLenum primitive_type;
 };
 
 struct VkCommandBuffer_T {
@@ -92,7 +95,6 @@ struct VkCommandBuffer_T {
     std::unique_ptr<VkCommandBuffer_T> buffer_next;
 
     struct {
-        GLuint program;
         GLuint draw_framebuffer;
         GLuint read_framebuffer;
     } gl_state;
@@ -251,6 +253,32 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
         pCreateInfo->pCode, pCreateInfo->codeSize / 4
     );
 
+    auto stage = compiler.get_entry_points_and_stages()[0].execution_model;
+    char in = 'x', out = 'x';
+
+    if (stage == spv::ExecutionModelVertex) {
+        in = 's';
+        out = 'v';
+    } else if (stage == spv::ExecutionModelFragment) {
+        // TODO: should this handle tessellation and geometry shaders too?
+        in = 'v';
+        out = 'f';
+    }
+
+    auto resources = compiler.get_shader_resources();
+
+    for (auto variable : resources.stage_inputs) {
+        auto location = 
+            compiler.get_decoration(variable.id, spv::DecorationLocation);
+        compiler.set_name(variable.id, in + std::to_string(location));
+    }
+
+    for (auto variable : resources.stage_outputs) {
+        auto location = 
+            compiler.get_decoration(variable.id, spv::DecorationLocation);
+        compiler.set_name(variable.id, out + std::to_string(location));
+    }
+
     spirv_cross::CompilerGLSL::Options options{
         .version = 300, // nothing newer supported in WebGL
         .es = true,
@@ -262,6 +290,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
 	compiler.set_common_options(options);
     
     shader_module.glsl = compiler.compile();
+
+    printf("%s\n", shader_module.glsl.c_str());
 
     *pShaderModule = (VkShaderModule)new VkShaderModule_T(shader_module);
     return VK_SUCCESS;
@@ -286,8 +316,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     for (int i = 0; i < createInfoCount; i++) {
         auto create_info = pCreateInfos[i];
 
-        VkPipeline_T pipeline;
-        pipeline.program = glCreateProgram();
+        VkPipeline_T pipeline {
+            .program = glCreateProgram(),
+            .primitive_type = 
+                gl_primitive_type(create_info.pInputAssemblyState->topology)
+        };
+
 
         for (int j = 0; j < create_info.stageCount; j++) {
             auto stage = create_info.pStages[j];
@@ -501,13 +535,14 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
     VkPipelineBindPoint pipelineBindPoint,
     VkPipeline pipeline
 ) {
-    GLuint program = ((VkPipeline_T*)pipeline)->program;
-    if (commandBuffer->gl_state.program != program) {
+    auto pipeline_data = (VkPipeline_T*)pipeline;
+    GLuint program = pipeline_data->program;
+    if (program != commandBuffer->graphics_pipeline->program) {
         add_commmand(commandBuffer, [=](){
             glUseProgram(program);
         });
-        commandBuffer->gl_state.program = program;
     }
+    commandBuffer->graphics_pipeline = pipeline_data;
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(
@@ -546,14 +581,15 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     uint32_t firstVertex,
     uint32_t firstInstance
 ) {
+    GLenum primitive_type = commandBuffer->graphics_pipeline->primitive_type;
     if (instanceCount == 1) {
         add_commmand(commandBuffer, [=](){
-            glDrawArrays(GL_TRIANGLES, firstVertex, vertexCount);
+            glDrawArrays(primitive_type, firstVertex, vertexCount);
         });
     } else if (firstInstance == 0) {
         add_commmand(commandBuffer, [=](){
             glDrawArraysInstanced(
-                GL_TRIANGLES, firstVertex, vertexCount, instanceCount
+                primitive_type, firstVertex, vertexCount, instanceCount
             );
         });
     } else {
