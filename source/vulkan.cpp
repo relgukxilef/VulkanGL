@@ -91,7 +91,7 @@ struct VkPipeline_T {
 };
 
 struct VkCommandBuffer_T {
-    const VkPipeline_T* graphics_pipeline;
+    const VkPipeline_T* graphics_pipeline = nullptr;
     std::unique_ptr<VkCommandBuffer_T> buffer_next;
 
     struct {
@@ -537,7 +537,10 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
 ) {
     auto pipeline_data = (VkPipeline_T*)pipeline;
     GLuint program = pipeline_data->program;
-    if (program != commandBuffer->graphics_pipeline->program) {
+    if (
+        commandBuffer->graphics_pipeline == nullptr ||
+        program != commandBuffer->graphics_pipeline->program
+    ) {
         add_commmand(commandBuffer, [=](){
             glUseProgram(program);
         });
@@ -551,12 +554,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(
     uint32_t viewportCount,
     const VkViewport* pViewports
 ) {
-    add_commmand(commandBuffer, [=](){
-        glViewport(
-            pViewports[0].x, pViewports[0].y, 
-            pViewports[0].width, pViewports[0].height
-        );
-        glDepthRangef(pViewports[0].minDepth, pViewports[0].maxDepth);
+    float
+        x = pViewports[0].x, y = pViewports[0].y,
+        width = pViewports[0].width, height = pViewports[0].height,
+        min_depth = pViewports[0].minDepth, max_depth = pViewports[0].maxDepth;
+    add_commmand(commandBuffer, [x, y, width, height, min_depth, max_depth](){
+        glViewport(x, y, width, height);
+        glDepthRangef(min_depth, max_depth);
     });
 }
 
@@ -566,11 +570,11 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(
     uint32_t scissorCount,
     const VkRect2D* pScissors
 ) {
-    add_commmand(commandBuffer, [=](){
-        glScissor(
-            pScissors[0].offset.x, pScissors[0].offset.y, 
-            pScissors[0].extent.width, pScissors[0].extent.height
-        );
+    int
+        x = pScissors[0].offset.x, y = pScissors[0].offset.y,
+        width = pScissors[0].extent.width, height = pScissors[0].extent.height;
+    add_commmand(commandBuffer, [x, y, width, height](){
+        glScissor(x, y, width, height);
     });
 }
 
