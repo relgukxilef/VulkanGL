@@ -562,11 +562,12 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
         VkWriteDescriptorSet write = pDescriptorWrites[i];
         switch (write.descriptorType) {
         case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+            auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
             glBindBufferRange(
                 GL_UNIFORM_BUFFER, write.dstBinding,
-                write.pBufferInfo->buffer->memory->vertex_buffer_object,
-                write.pBufferInfo->buffer->offset,
-                write.pBufferInfo->buffer->size
+                buffer->memory->vertex_buffer_object,
+                buffer->offset,
+                buffer->size
             );
             break;
         }
