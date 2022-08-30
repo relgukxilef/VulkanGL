@@ -37,6 +37,15 @@ struct VkCommandPool_T {
 };
 struct VkQueue_T {} global_queue;
 struct VkSemaphore_T {};
+struct VkDeviceMemory_T {
+    std::unique_ptr<char[]> mapping;
+    GLuint vertex_buffer_object;
+};
+struct VkBuffer_T {
+    VkDeviceMemory_T* memory;
+    unsigned size;
+    unsigned offset;
+};
 struct VkImage_T {
     GLuint name;
     GLenum internal_format;
@@ -161,6 +170,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
     return VK_SUCCESS;
 }
 
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceMemoryProperties* pMemoryProperties
+) {}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     VkPhysicalDevice physicalDevice,
     const VkDeviceCreateInfo* pCreateInfo,
@@ -179,6 +193,124 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(
 ) {
     global_device = nullptr;
     delete device;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
+    VkDevice device,
+    const VkMemoryAllocateInfo* pAllocateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDeviceMemory* pMemory
+) {
+    GLuint buffer;
+    glGenBuffers(1, &buffer);
+    glBindBuffer(GL_UNIFORM_BUFFER, buffer);
+    glBufferData(
+        GL_UNIFORM_BUFFER, pAllocateInfo->allocationSize, nullptr,
+        GL_DYNAMIC_COPY
+    );
+    *pMemory = (VkDeviceMemory)new VkDeviceMemory_T {
+        .mapping = std::make_unique<char[]>(pAllocateInfo->allocationSize),
+        .vertex_buffer_object = buffer,
+    };
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkFreeMemory(
+    VkDevice device,
+    VkDeviceMemory memory,
+    const VkAllocationCallbacks* pAllocator
+) {
+    auto internal = (VkDeviceMemory_T*)memory;
+    glDeleteBuffers(1, &internal->vertex_buffer_object);
+    delete internal;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(
+    VkDevice device,
+    VkDeviceMemory memory,
+    VkDeviceSize offset,
+    VkDeviceSize size,
+    VkMemoryMapFlags flags,
+    void** ppData
+) {
+    auto internal = (VkDeviceMemory_T*)memory;
+    *ppData = internal->mapping.get() + offset;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(
+    VkDevice device,
+    VkDeviceMemory memory
+) {
+
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkFlushMappedMemoryRanges(
+    VkDevice device,
+    uint32_t memoryRangeCount,
+    const VkMappedMemoryRange* pMemoryRanges
+) {
+    for (auto i = 0u; i < memoryRangeCount; i++) {
+        VkMappedMemoryRange range = pMemoryRanges[i];
+        auto internal = (VkDeviceMemory_T*)range.memory;
+        glBindBuffer(GL_COPY_WRITE_BUFFER, internal->vertex_buffer_object);
+        glBufferSubData(
+            GL_UNIFORM_BUFFER, range.offset, range.size,
+            internal->mapping.get() + range.offset
+        );
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkInvalidateMappedMemoryRanges(
+    VkDevice device,
+    uint32_t memoryRangeCount,
+    const VkMappedMemoryRange* pMemoryRanges
+) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(
+    VkDevice device,
+    VkBuffer buffer,
+    VkDeviceMemory memory,
+    VkDeviceSize memoryOffset
+) {
+    auto internal = (VkBuffer_T*)buffer;
+    internal->memory = (VkDeviceMemory_T*)memory;
+    internal->offset = memoryOffset;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
+    VkDevice device,
+    VkBuffer buffer,
+    VkMemoryRequirements* pMemoryRequirements
+) {
+    auto internal = (VkBuffer_T*)buffer;
+    pMemoryRequirements->alignment = 1;
+    pMemoryRequirements->size = internal->size;
+    pMemoryRequirements->memoryTypeBits = ~0;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
+    VkDevice device,
+    const VkBufferCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkBuffer* pBuffer
+) {
+    *pBuffer = (VkBuffer)new VkBuffer_T {
+        .size = (unsigned)pCreateInfo->size,
+    };
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(
+    VkDevice device,
+    VkBuffer buffer,
+    const VkAllocationCallbacks* pAllocator
+) {
+    delete (VkBuffer_T*)buffer;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
@@ -370,6 +502,75 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyPipelineLayout(
     const VkAllocationCallbacks* pAllocator
 ) {
     // TODO
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
+    VkDevice device,
+    const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDescriptorSetLayout* pSetLayout
+) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorSetLayout(
+    VkDevice device,
+    VkDescriptorSetLayout descriptorSetLayout,
+    const VkAllocationCallbacks* pAllocator
+) {}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorPool(
+    VkDevice device,
+    const VkDescriptorPoolCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkDescriptorPool* pDescriptorPool
+) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorPool(
+    VkDevice device,
+    VkDescriptorPool descriptorPool,
+    const VkAllocationCallbacks* pAllocator
+) {}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateDescriptorSets(
+    VkDevice device,
+    const VkDescriptorSetAllocateInfo* pAllocateInfo,
+    VkDescriptorSet* pDescriptorSets
+) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkFreeDescriptorSets(
+    VkDevice device,
+    VkDescriptorPool descriptorPool,
+    uint32_t descriptorSetCount,
+    const VkDescriptorSet* pDescriptorSets
+) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
+    VkDevice device,
+    uint32_t descriptorWriteCount,
+    const VkWriteDescriptorSet* pDescriptorWrites,
+    uint32_t descriptorCopyCount,
+    const VkCopyDescriptorSet* pDescriptorCopies
+) {
+    for (auto i = 0u; i < descriptorWriteCount; i++) {
+        VkWriteDescriptorSet write = pDescriptorWrites[i];
+        switch (write.descriptorType) {
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+            glBindBufferRange(
+                GL_UNIFORM_BUFFER, write.dstBinding,
+                write.pBufferInfo->buffer->memory->vertex_buffer_object,
+                write.pBufferInfo->buffer->offset,
+                write.pBufferInfo->buffer->size
+            );
+            break;
+        }
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
@@ -581,6 +782,19 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(
     add_commmand(commandBuffer, [x, y, width, height](){
         glScissor(x, y, width, height);
     });
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
+    VkCommandBuffer commandBuffer,
+    VkPipelineBindPoint pipelineBindPoint,
+    VkPipelineLayout layout,
+    uint32_t firstSet,
+    uint32_t descriptorSetCount,
+    const VkDescriptorSet* pDescriptorSets,
+    uint32_t dynamicOffsetCount,
+    const uint32_t* pDynamicOffsets
+) {
+    // TODO
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
