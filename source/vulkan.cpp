@@ -595,7 +595,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
             ((VkImageView_T*)pCreateInfo->pAttachments[i])->image->name, 0
         );
     }
-
+    /*
     auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
     if (status == GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT) {
         fprintf(stderr, "Framebuffer has incomplete attachment");
@@ -617,7 +617,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
     } else if (status != GL_FRAMEBUFFER_COMPLETE) {
         fprintf(stderr, "Framebuffer is incomplete for unknown reason");
     }
-
+    */
     *pFramebuffer = (VkFramebuffer)framebuffer;
     return VK_SUCCESS;
 }
@@ -897,7 +897,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(
     VkBool32 waitAll,
     uint64_t timeout
 ) {
-    glFinish();
     /*
     auto end = 
         std::chrono::high_resolution_clock::now() + 
