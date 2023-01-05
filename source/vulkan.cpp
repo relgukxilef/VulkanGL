@@ -38,6 +38,8 @@ struct VkCommandPool_T {
 struct VkQueue_T {} global_queue;
 struct VkSemaphore_T {};
 struct VkDeviceMemory_T {
+    // TODO: for some buffer usages (e.g. VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)
+    // don't need to be stored on the GPU
     std::unique_ptr<char[]> mapping;
     GLuint vertex_buffer_object;
 };
@@ -102,22 +104,29 @@ struct stop_command : public command {
 struct VkPipeline_T {
     GLuint program;
     GLenum primitive_type;
+    bool cull, cull_clockwise;
 };
 
 struct VkCommandBuffer_T {
-    const VkPipeline_T* graphics_pipeline = nullptr;
     std::unique_ptr<VkCommandBuffer_T> buffer_next;
 
     struct {
+        // TODO: need to be able to encode part of the state being unknown
+        std::uint32_t
+            draw_framebuffer_set : 1, read_framebuffer_set : 1,
+            cull_set : 1, cull_clockwise_set : 1, program_set : 1;
         GLuint draw_framebuffer;
         GLuint read_framebuffer;
+        GLuint program;
+        bool cull = false, cull_clockwise = true;
     } gl_state;
+    GLenum primitive_type;
 
     std::unique_ptr<command> first, * next = &first;
 };
 
 template<class T>
-void add_commmand(
+void add_command(
     VkCommandBuffer commandBuffer, T&& functor
 ) {
     commandBuffer->next->reset(new lambda_command<T>(std::move(functor)));
@@ -456,9 +465,18 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
         VkPipeline_T pipeline {
             .program = glCreateProgram(),
             .primitive_type = 
-                gl_primitive_type(create_info.pInputAssemblyState->topology)
+                gl_primitive_type(create_info.pInputAssemblyState->topology),
+            .cull =
+                pCreateInfos->pRasterizationState->cullMode !=
+                VK_CULL_MODE_NONE,
+            .cull_clockwise = (
+                pCreateInfos->pRasterizationState->frontFace ==
+                VK_FRONT_FACE_CLOCKWISE
+            ) == (
+                pCreateInfos->pRasterizationState->cullMode ==
+                VK_CULL_MODE_FRONT_BIT
+            )
         };
-
 
         for (int j = 0; j < create_info.stageCount; j++) {
             auto stage = create_info.pStages[j];
@@ -726,6 +744,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBeginCommandBuffer(
     VkCommandBuffer commandBuffer,
     const VkCommandBufferBeginInfo* pBeginInfo
 ) {
+    commandBuffer->gl_state = {};
     return VK_SUCCESS;
 }
 
@@ -737,6 +756,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEndCommandBuffer(
     return VK_SUCCESS;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandBuffer(
+    VkCommandBuffer commandBuffer,
+    VkCommandBufferResetFlags flags
+) {
+    commandBuffer->next = &commandBuffer->first;
+    commandBuffer->first.reset();
+    return VK_SUCCESS;
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
     VkCommandBuffer commandBuffer,
     VkPipelineBindPoint pipelineBindPoint,
@@ -744,15 +772,46 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
 ) {
     auto pipeline_data = (VkPipeline_T*)pipeline;
     GLuint program = pipeline_data->program;
+
     if (
-        commandBuffer->graphics_pipeline == nullptr ||
-        program != commandBuffer->graphics_pipeline->program
+        !commandBuffer->gl_state.cull_set ||
+        pipeline_data->cull != commandBuffer->gl_state.cull
     ) {
-        add_commmand(commandBuffer, [=](){
+        if (pipeline_data->cull) {
+            add_command(commandBuffer, [](){
+                glEnable(GL_CULL_FACE);
+            });
+            bool clockwise = pipeline_data->cull_clockwise;
+            if (
+                !commandBuffer->gl_state.cull_clockwise_set ||
+                clockwise != commandBuffer->gl_state.cull_clockwise
+            ) {
+                add_command(commandBuffer, [clockwise](){
+                    glCullFace(clockwise ? GL_BACK : GL_FRONT);
+                });
+                commandBuffer->gl_state.cull_clockwise_set = true;
+                commandBuffer->gl_state.cull_clockwise = clockwise;
+            }
+        } else {
+            add_command(commandBuffer, [](){
+                glDisable(GL_CULL_FACE);
+            });
+        }
+        commandBuffer->gl_state.cull_set = true;
+        commandBuffer->gl_state.cull = pipeline_data->cull;
+    }
+
+    if (
+        !commandBuffer->gl_state.program_set ||
+        program != pipeline_data->program
+    ) {
+        add_command(commandBuffer, [=](){
             glUseProgram(program);
         });
     }
-    commandBuffer->graphics_pipeline = pipeline_data;
+    commandBuffer->gl_state.program_set = true;
+    commandBuffer->gl_state.program = program;
+    commandBuffer->primitive_type = pipeline_data->primitive_type;
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(
@@ -765,7 +824,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(
         x = pViewports[0].x, y = pViewports[0].y,
         width = pViewports[0].width, height = pViewports[0].height,
         min_depth = pViewports[0].minDepth, max_depth = pViewports[0].maxDepth;
-    add_commmand(commandBuffer, [x, y, width, height, min_depth, max_depth](){
+    add_command(commandBuffer, [x, y, width, height, min_depth, max_depth](){
         glViewport(x, y, width, height);
         glDepthRangef(min_depth, max_depth);
     });
@@ -780,7 +839,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(
     int
         x = pScissors[0].offset.x, y = pScissors[0].offset.y,
         width = pScissors[0].extent.width, height = pScissors[0].extent.height;
-    add_commmand(commandBuffer, [x, y, width, height](){
+    add_command(commandBuffer, [x, y, width, height](){
         glScissor(x, y, width, height);
     });
 }
@@ -805,13 +864,14 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     uint32_t firstVertex,
     uint32_t firstInstance
 ) {
-    GLenum primitive_type = commandBuffer->graphics_pipeline->primitive_type;
+    GLenum primitive_type = commandBuffer->primitive_type;
+
     if (instanceCount == 1) {
-        add_commmand(commandBuffer, [=](){
+        add_command(commandBuffer, [=](){
             glDrawArrays(primitive_type, firstVertex, vertexCount);
         });
     } else if (firstInstance == 0) {
-        add_commmand(commandBuffer, [=](){
+        add_command(commandBuffer, [=](){
             glDrawArraysInstanced(
                 primitive_type, firstVertex, vertexCount, instanceCount
             );
@@ -819,6 +879,18 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     } else {
         // TODO
     }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    uint32_t drawCount,
+    uint32_t stride
+) {
+    GLenum primitive_type = commandBuffer->primitive_type;
+    // TODO: keep buffers with VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT in CPU memory
+    // and read it here to call glDraw...
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
@@ -845,19 +917,23 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
         ((VkFramebuffer_T*)pRenderPassBegin->framebuffer)->name;
     auto color = pRenderPassBegin->pClearValues->color;
 
-    if (commandBuffer->gl_state.draw_framebuffer != framebuffer) {
-        add_commmand(commandBuffer, [framebuffer, color](){ 
-            glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
+    if (
+        !commandBuffer->gl_state.draw_framebuffer_set ||
+        commandBuffer->gl_state.draw_framebuffer != framebuffer
+    ) {
+        add_command(commandBuffer, [framebuffer, color](){
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
             glClearColor(
                 color.float32[0], color.float32[1], 
                 color.float32[2], color.float32[3]
             );
             glClear(GL_COLOR_BUFFER_BIT);
         });
+        commandBuffer->gl_state.draw_framebuffer_set = true;
         commandBuffer->gl_state.draw_framebuffer = framebuffer;
 
     } else {
-        add_commmand(commandBuffer, [color](){ 
+        add_command(commandBuffer, [color](){
             glClearColor(
                 color.float32[0], color.float32[1], 
                 color.float32[2], color.float32[3]
