@@ -73,6 +73,29 @@ struct VkShaderModule_T {
     std::string glsl;
 };
 
+struct descriptor_set_layout {
+    GLuint binding;
+    unsigned count;
+    std::unique_ptr<VkSampler[]> immutable_samplers;
+};
+
+struct VkDescriptorSetLayout_T {
+    unsigned count;
+    std::unique_ptr<descriptor_set_layout[]> bindings;
+};
+
+struct buffer_range_bindings {
+    GLuint vertex_buffer_object;
+    GLintptr offset;
+    GLsizeiptr size;
+};
+
+struct VkDescriptorSet_T {
+    // safe to store the bindings here as Vulkan doesn't allow changing
+    // descriptor sets after they are bound in a command buffer
+    std::unique_ptr<buffer_range_bindings[]> bindings;
+};
+
 struct VkFramebuffer_T {
     GLuint name;
 };
@@ -88,7 +111,7 @@ struct command {
 
 template<class T>
 struct lambda_command final : public command {
-    lambda_command(T&& t) : t(t) {}
+    lambda_command(T&& t) : t(std::move(t)) {}
     void operator()() const override {
         t();
         (*next)();
@@ -528,6 +551,16 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
     const VkAllocationCallbacks* pAllocator,
     VkDescriptorSetLayout* pSetLayout
 ) {
+    auto layout = std::make_unique<VkDescriptorSetLayout_T>();
+    layout->bindings =
+        std::make_unique<descriptor_set_layout[]>(pCreateInfo->bindingCount);
+    layout->count = pCreateInfo->bindingCount;
+    for (auto i = 0u; i < pCreateInfo->bindingCount; i++) {
+        layout->bindings[i].binding = pCreateInfo->pBindings[i].binding;
+        layout->bindings[i].count = pCreateInfo->pBindings[i].descriptorCount;
+        // TODO: samplers
+    }
+    *pSetLayout = layout.release();
     return VK_SUCCESS;
 }
 
@@ -535,7 +568,9 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorSetLayout(
     VkDevice device,
     VkDescriptorSetLayout descriptorSetLayout,
     const VkAllocationCallbacks* pAllocator
-) {}
+) {
+    delete descriptorSetLayout;
+}
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorPool(
     VkDevice device,
@@ -557,6 +592,13 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateDescriptorSets(
     const VkDescriptorSetAllocateInfo* pAllocateInfo,
     VkDescriptorSet* pDescriptorSets
 ) {
+    for (auto i = 0u; i < pAllocateInfo->descriptorSetCount; i++) {
+        pDescriptorSets[i] = new VkDescriptorSet_T{
+            .bindings = std::make_unique<buffer_range_bindings[]>(
+                pAllocateInfo->pSetLayouts[i]->count
+            ),
+        };
+    }
     return VK_SUCCESS;
 }
 
@@ -566,6 +608,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkFreeDescriptorSets(
     uint32_t descriptorSetCount,
     const VkDescriptorSet* pDescriptorSets
 ) {
+    for (auto i = 0u; i < descriptorSetCount; i++) {
+        delete pDescriptorSets[i];
+    }
     return VK_SUCCESS;
 }
 
@@ -578,17 +623,13 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
 ) {
     for (auto i = 0u; i < descriptorWriteCount; i++) {
         VkWriteDescriptorSet write = pDescriptorWrites[i];
-        switch (write.descriptorType) {
-        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
-            auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
-            glBindBufferRange(
-                GL_UNIFORM_BUFFER, write.dstBinding,
-                buffer->memory->vertex_buffer_object,
-                buffer->offset,
-                buffer->size
-            );
-            break;
-        }
+        VkDescriptorSet set = write.dstSet;
+        auto& binding = set->bindings[write.dstBinding];
+        binding.vertex_buffer_object =
+            write.pBufferInfo->buffer->memory->vertex_buffer_object;
+        binding.offset =
+            write.pBufferInfo->buffer->offset + write.pBufferInfo->offset;
+        binding.size = write.pBufferInfo->range;
     }
 }
 
@@ -854,7 +895,21 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
     uint32_t dynamicOffsetCount,
     const uint32_t* pDynamicOffsets
 ) {
-    // TODO
+    auto sets = std::make_unique<buffer_range_bindings[]>(descriptorSetCount);
+    // TODO: binding offsets are not alligned to UNIFORM_BUFFER_OFFSET_ALIGNMENT
+    // Most GPUs require an alignment of 256 bytes.
+    for (auto i = 0u; i < descriptorSetCount; i++) {
+        sets[i] = pDescriptorSets[i]->bindings[0];
+    }
+    add_command(commandBuffer, [=, sets = std::move(sets)](){
+        for (auto i = 0u; i < descriptorSetCount; i++) {
+            auto set = sets[i];
+            glBindBufferRange(
+                GL_UNIFORM_BUFFER, firstSet + i,
+                set.vertex_buffer_object, set.offset, set.size
+            );
+        }
+    });
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
