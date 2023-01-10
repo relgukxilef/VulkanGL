@@ -560,7 +560,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
         layout->bindings[i].count = pCreateInfo->pBindings[i].descriptorCount;
         // TODO: samplers
     }
-    *pSetLayout = layout.release();
+    *pSetLayout = (VkDescriptorSetLayout)layout.release();
     return VK_SUCCESS;
 }
 
@@ -569,7 +569,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorSetLayout(
     VkDescriptorSetLayout descriptorSetLayout,
     const VkAllocationCallbacks* pAllocator
 ) {
-    delete descriptorSetLayout;
+    delete (VkDescriptorSetLayout_T*)descriptorSetLayout;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorPool(
@@ -593,9 +593,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateDescriptorSets(
     VkDescriptorSet* pDescriptorSets
 ) {
     for (auto i = 0u; i < pAllocateInfo->descriptorSetCount; i++) {
-        pDescriptorSets[i] = new VkDescriptorSet_T{
+        pDescriptorSets[i] = (VkDescriptorSet)new VkDescriptorSet_T{
             .bindings = std::make_unique<buffer_range_bindings[]>(
-                pAllocateInfo->pSetLayouts[i]->count
+                ((VkDescriptorSetLayout_T*)pAllocateInfo->pSetLayouts[i])->count
             ),
         };
     }
@@ -609,7 +609,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkFreeDescriptorSets(
     const VkDescriptorSet* pDescriptorSets
 ) {
     for (auto i = 0u; i < descriptorSetCount; i++) {
-        delete pDescriptorSets[i];
+        delete (VkDescriptorSet_T*)pDescriptorSets[i];
     }
     return VK_SUCCESS;
 }
@@ -623,12 +623,11 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
 ) {
     for (auto i = 0u; i < descriptorWriteCount; i++) {
         VkWriteDescriptorSet write = pDescriptorWrites[i];
-        VkDescriptorSet set = write.dstSet;
+        VkDescriptorSet_T* set = (VkDescriptorSet_T*)write.dstSet;
         auto& binding = set->bindings[write.dstBinding];
-        binding.vertex_buffer_object =
-            write.pBufferInfo->buffer->memory->vertex_buffer_object;
-        binding.offset =
-            write.pBufferInfo->buffer->offset + write.pBufferInfo->offset;
+        auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
+        binding.vertex_buffer_object = buffer->memory->vertex_buffer_object;
+        binding.offset = buffer->offset + write.pBufferInfo->offset;
         binding.size = write.pBufferInfo->range;
     }
 }
@@ -899,7 +898,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
     // TODO: binding offsets are not alligned to UNIFORM_BUFFER_OFFSET_ALIGNMENT
     // Most GPUs require an alignment of 256 bytes.
     for (auto i = 0u; i < descriptorSetCount; i++) {
-        sets[i] = pDescriptorSets[i]->bindings[0];
+        sets[i] = ((VkDescriptorSet_T*)pDescriptorSets[i])->bindings[0];
     }
     add_command(commandBuffer, [=, sets = std::move(sets)](){
         for (auto i = 0u; i < descriptorSetCount; i++) {
