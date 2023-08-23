@@ -20,18 +20,21 @@
 
 #include <spirv_glsl.hpp>
 
-#include "globals.h"
+#include "vulkan_private.h"
 #include "enumerates.h"
 #include "spirv.hpp"
 
 // TODO: move structs to header file
 // TODO: move globals to namespace
 
-struct VkPhysicalDevice_T {} global_physical_device;
+gl_extent_2d current_surface_extent;
+
+VkPhysicalDevice_T* global_physical_device;
 
 struct VkDevice_T {
     GLuint copy_framebuffer;
 } * global_device;
+
 struct VkCommandPool_T {
     std::unique_ptr<struct VkCommandBuffer_T> buffers;
 };
@@ -169,7 +172,7 @@ vkEnumeratePhysicalDevices(
     VkPhysicalDevice* pPhysicalDevices
 ) {
     if (pPhysicalDevices && *pPhysicalDeviceCount >= 1) {
-        pPhysicalDevices[0] = &global_physical_device;
+        pPhysicalDevices[0] = global_physical_device;
     } 
     *pPhysicalDeviceCount = 1;
     return VK_SUCCESS;
@@ -1068,6 +1071,13 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySemaphore(
     delete (VkSemaphore_T*)semaphore;
 }
 
+VKAPI_ATTR void vkGetPhysicalDeviceProperties(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceProperties* pProperties
+) {
+    *pProperties = ((VkPhysicalDevice_T*)physicalDevice)->device_properties;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     VkDevice device,
     const VkSwapchainCreateInfoKHR* pCreateInfo,
@@ -1164,17 +1174,87 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDebugUtilsMessengerEXT(
     delete (VkDebugUtilsMessengerEXT_T*)messenger;
 }
 
+VKAPI_ATTR PFN_vkVoidFunction vkGetDeviceProcAddr(
+    VkDevice device,
+    const char* pName
+) {
+    return vkGetInstanceProcAddr(nullptr, pName);
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     VkInstance instance,
     const char* pName
 ) {
-    if (strcmp(pName, "vkCreateDebugUtilsMessengerEXT") == 0) {
-        return (PFN_vkVoidFunction)vkCreateDebugUtilsMessengerEXT;
+    std::initializer_list<std::pair<const char*, PFN_vkVoidFunction>> map = {
+        {
+            "vkCreateDebugUtilsMessengerEXT",
+            (PFN_vkVoidFunction)vkCreateDebugUtilsMessengerEXT
+        }, {
+            "vkDestroyDebugUtilsMessengerEXT",
+            (PFN_vkVoidFunction)vkDestroyDebugUtilsMessengerEXT
+        }, {
+            "vkGetPhysicalDeviceProperties",
+            (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties
+        }, {
+            "vkGetPhysicalDeviceMemoryProperties",
+            (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties
+        }, {
+            "vkAllocateMemory",
+            (PFN_vkVoidFunction)vkAllocateMemory
+        }, {
+            "vkFreeMemory",
+            (PFN_vkVoidFunction)vkFreeMemory
+        }, {
+            "vkMapMemory",
+            (PFN_vkVoidFunction)vkMapMemory
+        }, {
+            "vkUnmapMemory",
+            (PFN_vkVoidFunction)vkUnmapMemory
+        }, {
+            "vkFlushMappedMemoryRanges",
+            (PFN_vkVoidFunction)vkFlushMappedMemoryRanges
+        }, {
+            "vkInvalidateMappedMemoryRanges",
+            (PFN_vkVoidFunction)vkInvalidateMappedMemoryRanges
+        }, {
+            "vkBindBufferMemory",
+            (PFN_vkVoidFunction)vkBindBufferMemory
+        }, {
+            "vkBindImageMemory",
+            (PFN_vkVoidFunction)vkBindImageMemory
+        }, {
+            "vkGetBufferMemoryRequirements",
+            (PFN_vkVoidFunction)vkGetBufferMemoryRequirements
+        }, {
+            "vkGetImageMemoryRequirements",
+            (PFN_vkVoidFunction)vkGetImageMemoryRequirements
+        }, {
+            "vkCreateBuffer",
+            (PFN_vkVoidFunction)vkCreateBuffer
+        }, {
+            "vkDestroyBuffer",
+            (PFN_vkVoidFunction)vkDestroyBuffer
+        }, {
+            "vkCreateImage",
+            (PFN_vkVoidFunction)vkCreateImage
+        }, {
+            "vkDestroyImage",
+            (PFN_vkVoidFunction)vkDestroyImage
+        }, {
+            "vkCmdCopyBuffer",
+            (PFN_vkVoidFunction)vkCmdCopyBuffer
+        }, {
+            "vkGetInstanceProcAddr",
+            (PFN_vkVoidFunction)vkGetInstanceProcAddr
+        },
+    };
+
+    for (auto f : map) {
+        if (strcmp(pName, f.first) == 0) {
+            return f.second;
+        }
     }
-    
-    if (strcmp(pName, "vkDestroyDebugUtilsMessengerEXT") == 0) {
-        return (PFN_vkVoidFunction)vkDestroyDebugUtilsMessengerEXT;
-    }
+
     return nullptr;
 }
 
