@@ -1,7 +1,7 @@
 #include "vulkangl/vulkangl.h"
 
 #include "vulkan_private.h"
-#include <utility>
+#include <algorithm>
 #include <cstring>
 
 struct VkInstance_T {} global_instance;
