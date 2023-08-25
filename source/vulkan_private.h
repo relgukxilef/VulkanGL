@@ -8,10 +8,21 @@
 struct VkPhysicalDevice_T {
     VkPhysicalDeviceProperties device_properties;
 };
-extern VkPhysicalDevice_T* global_physical_device;
 
 struct gl_extent_2d {
     GLsizei width, height;
 };
 
-extern gl_extent_2d current_surface_extent;
+struct VkDevice_T {
+    GLuint copy_framebuffer;
+};
+
+struct VkQueue_T {};
+
+namespace vgl {
+    extern VkPhysicalDevice_T* global_physical_device;
+    extern gl_extent_2d current_surface_extent;
+    extern VkDevice_T* global_device;
+    extern VkQueue_T global_queue;
+    extern VkDeviceSize device_memory, host_memory;
+}

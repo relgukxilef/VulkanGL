@@ -8,13 +8,13 @@ struct VkInstance_T {} global_instance;
 struct VkSurfaceKHR_T {} global_surface;
 
 VkInstance vglCreateInstanceForGL() {
-    global_physical_device = new VkPhysicalDevice_T;
-    global_physical_device->device_properties = VkPhysicalDeviceProperties{
+    vgl::global_physical_device = new VkPhysicalDevice_T;
+    vgl::global_physical_device->device_properties = VkPhysicalDeviceProperties{
         .apiVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
         .driverVersion = 1,
         .vendorID = 0,
         .deviceID = 0,
-        .deviceType = VkPhysicalDeviceType::VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+        .deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
         .deviceName = {},
         .pipelineCacheUUID = {},
         .limits = {}, // TODO
@@ -26,7 +26,7 @@ VkInstance vglCreateInstanceForGL() {
     auto vendor_length = std::strlen(vendor);
     auto renderer_length = std::strlen(renderer);
 
-    auto& name = global_physical_device->device_properties.deviceName;
+    auto& name = vgl::global_physical_device->device_properties.deviceName;
     memcpy(
         name, vendor,
         std::min<size_t>(vendor_length, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE)
@@ -48,8 +48,16 @@ VkSurfaceKHR vglCreateSurfaceForGL() {
 }
 
 void vglSetCurrentSurfaceExtent(VkExtent2D extent) {
-    current_surface_extent = { 
+    vgl::current_surface_extent = {
         (GLsizei)extent.width, 
         (GLsizei)extent.height 
     };
+}
+
+void vglSetDeviceMemory(VkDeviceSize size) {
+    vgl::device_memory = size;
+}
+
+void vglSetHostMemory(VkDeviceSize size) {
+    vgl::host_memory = size;
 }
