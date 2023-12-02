@@ -911,6 +911,25 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
     });
 }
 
+VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkIndexType indexType
+) {
+    // TODO
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstBinding,
+    uint32_t bindingCount,
+    const VkBuffer* pBuffers,
+    const VkDeviceSize* pOffsets
+) {
+    // TODO
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     VkCommandBuffer commandBuffer,
     uint32_t vertexCount,
@@ -933,6 +952,17 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     } else {
         // TODO
     }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
+    VkCommandBuffer commandBuffer,
+    uint32_t indexCount,
+    uint32_t instanceCount,
+    uint32_t firstIndex,
+    int32_t vertexOffset,
+    uint32_t firstInstance
+) {
+    // TODO
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(
