@@ -314,6 +314,16 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(
     return VK_SUCCESS;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(
+    VkDevice device,
+    VkImage image,
+    VkDeviceMemory memory,
+    VkDeviceSize memoryOffset
+) {
+    // TODO
+    return VK_SUCCESS;
+}
+
 VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
     VkDevice device,
     VkBuffer buffer,
@@ -323,6 +333,14 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
     pMemoryRequirements->alignment = 1;
     pMemoryRequirements->size = internal->size;
     pMemoryRequirements->memoryTypeBits = ~0;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
+    VkDevice device,
+    VkImage image,
+    VkMemoryRequirements* pMemoryRequirements
+) {
+    // TODO
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
