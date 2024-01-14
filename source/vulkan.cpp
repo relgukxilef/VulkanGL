@@ -563,6 +563,24 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyPipelineLayout(
     // TODO
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateSampler(
+    VkDevice device,
+    const VkSamplerCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSampler* pSampler
+) {
+    // TODO
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroySampler(
+    VkDevice device,
+    VkSampler sampler,
+    const VkAllocationCallbacks* pAllocator
+) {
+    // TODO
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
     VkDevice device,
     const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
@@ -995,6 +1013,17 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(
     // and read it here to call glDraw...
 }
 
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(
+    VkCommandBuffer commandBuffer,
+    VkBuffer srcBuffer,
+    VkImage dstImage,
+    VkImageLayout dstImageLayout,
+    uint32_t regionCount,
+    const VkBufferImageCopy* pRegions
+) {
+    // TODO
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
     VkCommandBuffer commandBuffer,
     VkPipelineStageFlags srcStageMask,
@@ -1266,6 +1295,13 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(
             (*(*buffer)->first)();
         }
     }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(
+    VkQueue queue
+) {
+    // TODO
     return VK_SUCCESS;
 }
 
