@@ -661,10 +661,17 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
         VkWriteDescriptorSet write = pDescriptorWrites[i];
         VkDescriptorSet_T* set = (VkDescriptorSet_T*)write.dstSet;
         auto& binding = set->bindings[write.dstBinding];
-        auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
-        binding.vertex_buffer_object = buffer->memory->vertex_buffer_object;
-        binding.offset = buffer->offset + write.pBufferInfo->offset;
-        binding.size = write.pBufferInfo->range;
+        if (write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+            auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
+            binding.vertex_buffer_object = buffer->memory->vertex_buffer_object;
+            binding.offset = buffer->offset + write.pBufferInfo->offset;
+            binding.size = write.pBufferInfo->range;
+
+        } else if (
+            write.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+        ) {
+            // TODO
+        }
     }
 }
 
