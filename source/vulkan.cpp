@@ -57,7 +57,11 @@ struct VkImage_T {
 struct VkSwapchainKHR_T {
     VkImage_T image;
 };
-struct VkDebugUtilsMessengerEXT_T {};
+struct VkDebugUtilsMessengerEXT_T {
+    void* user_data;
+    PFN_vkDebugUtilsMessengerCallbackEXT callback;
+    VkDebugUtilsMessengerEXT_T* next;
+} * debug_messengers = nullptr;
 
 struct VkFence_T {
     GLsync sync;
@@ -124,10 +128,21 @@ struct stop_command : public command {
 };
 
 
-struct VkPipeline_T {
+struct pipeline_info {
     GLuint program;
     GLenum primitive_type;
     bool cull, cull_clockwise;
+    struct {
+        GLintptr offset;
+        GLsizei stride;
+        GLenum type;
+        GLint element_size;
+        GLuint divisor;
+    } vertex[8];
+};
+
+struct VkPipeline_T {
+    pipeline_info p;
 };
 
 struct VkCommandBuffer_T {
@@ -140,10 +155,21 @@ struct VkCommandBuffer_T {
             cull_set : 1, cull_clockwise_set : 1, program_set : 1;
         GLuint draw_framebuffer;
         GLuint read_framebuffer;
-        GLuint program;
-        bool cull = false, cull_clockwise = true;
+        pipeline_info p;
+        struct {
+            GLuint buffer;
+            GLintptr offset;
+            GLsizeiptr size;
+        } index;
+        struct {
+            GLuint buffer;
+            GLintptr offset;
+            GLsizeiptr size;
+            bool bound = false;
+        } vertex[8];
     } gl_state;
     GLenum primitive_type;
+    GLenum index_type;
 
     std::unique_ptr<command> first, * next = &first;
 };
@@ -285,7 +311,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkFlushMappedMemoryRanges(
     for (auto i = 0u; i < memoryRangeCount; i++) {
         VkMappedMemoryRange range = pMemoryRanges[i];
         auto internal = (VkDeviceMemory_T*)range.memory;
-        glBindBuffer(GL_COPY_WRITE_BUFFER, internal->vertex_buffer_object);
+        glBindBuffer(
+            GL_COPY_WRITE_BUFFER, internal->vertex_buffer_object
+        );
         glBufferSubData(
             GL_UNIFORM_BUFFER, range.offset, range.size,
             internal->mapping.get() + range.offset
@@ -340,7 +368,13 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
     VkImage image,
     VkMemoryRequirements* pMemoryRequirements
 ) {
-    // TODO
+    auto internal = (VkImage_T*)image;
+    pMemoryRequirements->alignment = 1;
+    pMemoryRequirements->size = 
+        internal->width * internal->height * internal->depth * 4;
+    // TODO: handle levels > 1
+    // TODO: check image format
+    pMemoryRequirements->memoryTypeBits = ~0;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
@@ -369,22 +403,28 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
     const VkAllocationCallbacks* pAllocator,
     VkImage* pImage
 ) {
-    auto internal = new VkImage_T;
+    auto internal = new VkImage_T{
+        .internal_format = gl_format(pCreateInfo->format).internal_format,
+        .width = (GLsizei)pCreateInfo->extent.width,
+        .height = (GLsizei)pCreateInfo->extent.height,
+        .depth = (GLsizei)pCreateInfo->extent.depth,
+        .levels = (GLsizei)pCreateInfo->mipLevels,
+    };
     glGenTextures(1, &internal->name);
     if (pCreateInfo->extent.depth == 1 && pCreateInfo->arrayLayers == 1) {
         glBindTexture(GL_TEXTURE_2D, internal->name);
         glTexStorage2D(
             GL_TEXTURE_2D, pCreateInfo->mipLevels, 
-            gl_internal_format(pCreateInfo->format), 
-            pCreateInfo->extent.width, pCreateInfo->extent.height
+            internal->internal_format,
+            internal->width, internal->height
         );
     } else if (pCreateInfo->arrayLayers == 1) {
         glBindTexture(GL_TEXTURE_3D, internal->name);
         glTexStorage3D(
             GL_TEXTURE_3D, pCreateInfo->mipLevels, 
-            gl_internal_format(pCreateInfo->format), 
-            pCreateInfo->extent.width, pCreateInfo->extent.height, 
-            pCreateInfo->extent.depth
+            internal->internal_format,
+            internal->width, internal->height, 
+            internal->depth
         );
     } else {
         assert(false);
@@ -504,19 +544,22 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
         auto create_info = pCreateInfos[i];
 
         VkPipeline_T pipeline {
-            .program = glCreateProgram(),
-            .primitive_type = 
-                gl_primitive_type(create_info.pInputAssemblyState->topology),
-            .cull =
-                pCreateInfos->pRasterizationState->cullMode !=
-                VK_CULL_MODE_NONE,
-            .cull_clockwise = (
-                pCreateInfos->pRasterizationState->frontFace ==
-                VK_FRONT_FACE_CLOCKWISE
-            ) == (
-                pCreateInfos->pRasterizationState->cullMode ==
-                VK_CULL_MODE_FRONT_BIT
-            )
+            .p = {
+                .program = glCreateProgram(),
+                .primitive_type = gl_primitive_type(
+                    create_info.pInputAssemblyState->topology
+                ),
+                .cull =
+                    pCreateInfos->pRasterizationState->cullMode !=
+                    VK_CULL_MODE_NONE,
+                .cull_clockwise = (
+                    pCreateInfos->pRasterizationState->frontFace ==
+                    VK_FRONT_FACE_CLOCKWISE
+                ) == (
+                    pCreateInfos->pRasterizationState->cullMode ==
+                    VK_CULL_MODE_FRONT_BIT
+                )
+            },
         };
 
         for (int j = 0; j < create_info.stageCount; j++) {
@@ -529,10 +572,39 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
             const GLint length = shader_module->glsl.size();
             glShaderSource(shader, 1, &source, &length);
             glCompileShader(shader);
-            glAttachShader(pipeline.program, shader);
+            glAttachShader(pipeline.p.program, shader);
         }
-        glLinkProgram(pipeline.program);
+        glLinkProgram(pipeline.p.program);
         pPipelines[i] = (VkPipeline)new VkPipeline_T(pipeline);
+
+        VkVertexInputBindingDescription bindings[8];
+        for (
+            int j = 0; 
+            j < create_info.pVertexInputState->vertexBindingDescriptionCount;
+            j++
+        ) {
+            auto binding = 
+                create_info.pVertexInputState->pVertexBindingDescriptions[j];
+            bindings[binding.binding] = binding;
+        }
+
+        for (
+            int j = 0; 
+            j < create_info.pVertexInputState->vertexAttributeDescriptionCount;
+            j++
+        ) {
+            auto attribute = 
+                create_info.pVertexInputState->pVertexAttributeDescriptions[j];
+            auto binding = bindings[attribute.binding];
+            auto format = gl_format(attribute.format);
+            pipeline.p.vertex[attribute.location] = {
+                .offset = attribute.offset,
+                .stride = static_cast<GLsizei>(binding.stride),
+                .type = format.type,
+                .element_size = format.size,
+                .divisor = binding.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE,
+            };
+        }
     }
     return VK_SUCCESS;
 }
@@ -542,7 +614,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyPipeline(
     VkPipeline pipeline,
     const VkAllocationCallbacks* pAllocator
 ) {
-    glDeleteProgram(((VkPipeline_T*)pipeline)->program);
+    glDeleteProgram(((VkPipeline_T*)pipeline)->p.program);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineLayout(
@@ -696,29 +768,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
             ((VkImageView_T*)pCreateInfo->pAttachments[i])->image->name, 0
         );
     }
-    /*
-    auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    if (status == GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT) {
-        fprintf(stderr, "Framebuffer has incomplete attachment");
-    } else if (status == GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT) {
-        fprintf(stderr, "Framebuffer needs at least one attachment");
-    } else if (status == GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE) {
-        fprintf(
-            stderr,
-            "Framebuffer attachments must have same number and "
-            "location of samples"
-        );
-    } else if (status == GL_FRAMEBUFFER_UNSUPPORTED) {
-        fprintf(stderr, "Framebuffer internal format not supported");
-    } else if (status == GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS) {
-        fprintf(
-            stderr,
-            "All attached images much have the same width and height."
-        );
-    } else if (status != GL_FRAMEBUFFER_COMPLETE) {
-        fprintf(stderr, "Framebuffer is incomplete for unknown reason");
-    }
-    */
+    
+    check(glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    
     *pFramebuffer = (VkFramebuffer)framebuffer;
     return VK_SUCCESS;
 }
@@ -854,26 +906,26 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
     VkPipeline pipeline
 ) {
     auto pipeline_data = (VkPipeline_T*)pipeline;
-    GLuint program = pipeline_data->program;
+    GLuint program = pipeline_data->p.program;
 
     if (
         !commandBuffer->gl_state.cull_set ||
-        pipeline_data->cull != commandBuffer->gl_state.cull
+        pipeline_data->p.cull != commandBuffer->gl_state.p.cull
     ) {
-        if (pipeline_data->cull) {
+        if (pipeline_data->p.cull) {
             add_command(commandBuffer, [](){
                 glEnable(GL_CULL_FACE);
             });
-            bool clockwise = pipeline_data->cull_clockwise;
+            bool clockwise = pipeline_data->p.cull_clockwise;
             if (
                 !commandBuffer->gl_state.cull_clockwise_set ||
-                clockwise != commandBuffer->gl_state.cull_clockwise
+                clockwise != commandBuffer->gl_state.p.cull_clockwise
             ) {
                 add_command(commandBuffer, [clockwise](){
                     glCullFace(clockwise ? GL_BACK : GL_FRONT);
                 });
                 commandBuffer->gl_state.cull_clockwise_set = true;
-                commandBuffer->gl_state.cull_clockwise = clockwise;
+                commandBuffer->gl_state.p.cull_clockwise = clockwise;
             }
         } else {
             add_command(commandBuffer, [](){
@@ -881,20 +933,20 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
             });
         }
         commandBuffer->gl_state.cull_set = true;
-        commandBuffer->gl_state.cull = pipeline_data->cull;
+        commandBuffer->gl_state.p.cull = pipeline_data->p.cull;
     }
 
     if (
         !commandBuffer->gl_state.program_set ||
-        program != pipeline_data->program
+        program != pipeline_data->p.program
     ) {
         add_command(commandBuffer, [=](){
             glUseProgram(program);
         });
     }
     commandBuffer->gl_state.program_set = true;
-    commandBuffer->gl_state.program = program;
-    commandBuffer->primitive_type = pipeline_data->primitive_type;
+    commandBuffer->gl_state.p = pipeline_data->p;
+    commandBuffer->primitive_type = pipeline_data->p.primitive_type;
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(
@@ -960,7 +1012,10 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(
     VkDeviceSize offset,
     VkIndexType indexType
 ) {
-    // TODO
+    commandBuffer->index_type = gl_index_type(indexType);
+    commandBuffer->gl_state.index.buffer = buffer->memory->vertex_buffer_object;
+    commandBuffer->gl_state.index.offset = buffer->offset + offset;
+    commandBuffer->gl_state.index.size = buffer->size;
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
@@ -970,8 +1025,55 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
     const VkBuffer* pBuffers,
     const VkDeviceSize* pOffsets
 ) {
-    // TODO
+    for (auto i = 0u; i < bindingCount; i++) {
+        const VkBuffer buffer = pBuffers[i];
+        auto binding = i + firstBinding;
+        commandBuffer->gl_state.vertex[binding] = {
+            .buffer = buffer->memory->vertex_buffer_object,
+            .offset = static_cast<GLintptr>(pOffsets[i] + buffer->offset),
+            .size = buffer->size,
+            .bound = true,
+        };
+    }
 }
+
+template<class Smart, class Pointer>
+struct out_ptr_t {
+    out_ptr_t(Smart& smart) : smart(smart) {}
+    ~out_ptr_t() { smart = Smart(pointer); }
+
+    operator Pointer*() { return &pointer; }
+
+    Smart &smart;
+    Pointer pointer;
+};
+
+template<class Smart>
+out_ptr_t<Smart, typename Smart::pointer> out_ptr(Smart& smart) {
+    return { smart };
+}
+
+struct unique_vertex_array_object {
+    unique_vertex_array_object() : value(0) {}
+    unique_vertex_array_object(GLuint value) : value(value) {}
+    unique_vertex_array_object(const unique_vertex_array_object&) = delete;
+    unique_vertex_array_object(unique_vertex_array_object&& o) : 
+        value(o.value) 
+    {
+        o.value = 0;
+    }
+    ~unique_vertex_array_object() {
+        glDeleteVertexArrays(1, &value);
+    }
+    unique_vertex_array_object& operator=(const unique_vertex_array_object&) = 
+        delete;
+    unique_vertex_array_object& operator=(unique_vertex_array_object&& o) {
+        std::swap(value, o.value);
+        return *this;
+    }
+    GLuint value;
+    typedef GLuint pointer;
+};
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     VkCommandBuffer commandBuffer,
@@ -981,6 +1083,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     uint32_t firstInstance
 ) {
     GLenum primitive_type = commandBuffer->primitive_type;
+    // TODO: bind vertex attributes
 
     if (instanceCount == 1) {
         add_command(commandBuffer, [=](){
@@ -1005,7 +1108,48 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
     int32_t vertexOffset,
     uint32_t firstInstance
 ) {
-    // TODO
+    GLenum primitive_type = commandBuffer->primitive_type;
+    GLenum index_type = commandBuffer->index_type;
+    unique_vertex_array_object vertex_array;
+    glGenVertexArrays(1, out_ptr(vertex_array));
+    glBindVertexArray(vertex_array.value);
+    glBindBuffer(
+        GL_ELEMENT_ARRAY_BUFFER,
+        commandBuffer->gl_state.index.buffer
+    );
+    for (auto i = 0u; i < 8; i++) {
+        if (commandBuffer->gl_state.vertex[i].bound) {
+            glBindBuffer(
+                GL_ARRAY_BUFFER, commandBuffer->gl_state.vertex[i].buffer
+            );
+            glEnableVertexAttribArray(i);
+            // TODO: handle integer (glVertexAttribIPointer)
+            glVertexAttribPointer(
+                i, 
+                commandBuffer->gl_state.p.vertex[i].element_size, 
+                commandBuffer->gl_state.p.vertex[i].type, GL_FALSE,
+                commandBuffer->gl_state.p.vertex[i].stride,
+                reinterpret_cast<void*>(
+                    commandBuffer->gl_state.p.vertex[i].offset +
+                    commandBuffer->gl_state.vertex[i].offset + 
+                    commandBuffer->gl_state.p.vertex[i].stride * vertexOffset
+                )
+            );
+        }
+    }
+
+    if (instanceCount == 1) {
+        add_command(
+            commandBuffer, [=, vertex_array = std::move(vertex_array)](){
+                glBindVertexArray(vertex_array.value);
+                glDrawElements(
+                    primitive_type, indexCount, index_type, nullptr
+                );
+            }
+        );
+    } else {
+        // TODO
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(
@@ -1169,7 +1313,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     *pSwapchain = (VkSwapchainKHR)new VkSwapchainKHR_T{
         .image = {
             .name = name,
-            .internal_format = gl_internal_format(pCreateInfo->imageFormat),
+            .internal_format = 
+                gl_format(pCreateInfo->imageFormat).internal_format,
             .width = current_surface_extent.width,
             .height = current_surface_extent.height,
             .depth = 1,
@@ -1230,13 +1375,54 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     return VK_SUCCESS;
 }
 
+void GLAD_API_PTR write_debug_message(
+    GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, 
+    const GLchar* message, const void*
+) {
+    VkDebugUtilsMessengerCallbackDataEXT vk_message = {
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT,
+        .pMessage = message,
+    };
+    VkDebugUtilsMessageSeverityFlagBitsEXT vk_severity;
+    switch (severity) {
+        case GL_DEBUG_SEVERITY_NOTIFICATION:
+            vk_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT;
+            break;
+        case GL_DEBUG_SEVERITY_LOW:
+            vk_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
+            break;
+        case GL_DEBUG_SEVERITY_MEDIUM:
+            vk_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+            break;
+        case GL_DEBUG_SEVERITY_HIGH:
+            vk_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+            break;
+    }
+    VkDebugUtilsMessengerEXT_T* messenger = debug_messengers;
+    while (messenger != nullptr) {
+        messenger->callback(
+            vk_severity, VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT, 
+            &vk_message, messenger->user_data
+        );
+        messenger = messenger->next;
+    }
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDebugUtilsMessengerEXT(
     VkInstance instance,
-    const VkDebugUtilsMessengerCreateInfoEXT*   pCreateInfo,
+    const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
     VkDebugUtilsMessengerEXT* pMessenger
 ) {
-    *pMessenger = (VkDebugUtilsMessengerEXT)new VkDebugUtilsMessengerEXT_T;
+    glEnable(GL_DEBUG_OUTPUT);
+    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+    glDebugMessageCallback(write_debug_message, nullptr);
+    *pMessenger = (VkDebugUtilsMessengerEXT)new VkDebugUtilsMessengerEXT_T{
+        pCreateInfo->pUserData,
+        pCreateInfo->pfnUserCallback,
+        debug_messengers
+    };
+    debug_messengers = *pMessenger;
     return VK_SUCCESS;
 }
 
@@ -1245,6 +1431,11 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDebugUtilsMessengerEXT(
     VkDebugUtilsMessengerEXT messenger,
     const VkAllocationCallbacks* pAllocator
 ) {
+    VkDebugUtilsMessengerEXT_T** m = &debug_messengers;
+    while (*m != messenger) {
+        m = &(*m)->next;
+    }
+    *m = (*m)->next;
     delete (VkDebugUtilsMessengerEXT_T*)messenger;
 }
 
