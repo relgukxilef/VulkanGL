@@ -101,10 +101,15 @@ struct VkDescriptorSet_T {
 };
 
 struct VkFramebuffer_T {
-    GLuint name;
+    const VkImageView_T* attachments[8];
 };
 
 struct VkRenderPass_T {
+    // only support single subpass for now
+    std::size_t depth_attachment;
+    std::size_t color_attachments[8];
+    std::size_t resolve_attachments;
+    unsigned color_attachment_count;
 };
 
 struct command {
@@ -575,7 +580,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
             glAttachShader(pipeline.p.program, shader);
         }
         glLinkProgram(pipeline.p.program);
-        pPipelines[i] = (VkPipeline)new VkPipeline_T(pipeline);
 
         VkVertexInputBindingDescription bindings[8];
         for (
@@ -605,6 +609,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
                 .divisor = binding.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE,
             };
         }
+        pPipelines[i] = (VkPipeline)new VkPipeline_T(pipeline);
     }
     return VK_SUCCESS;
 }
@@ -754,22 +759,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
     VkFramebuffer* pFramebuffer
 ) {
     auto framebuffer = new VkFramebuffer_T;
-    // TODO: check whether this framebuffer is equivalent to framebuffer 0
-    glGenFramebuffers(1, &framebuffer->name);
-    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer->name);
-
-    for (auto i = 0; i < pCreateInfo->attachmentCount; i++) {
-        glBindTexture(
-            GL_TEXTURE_2D, 
-            ((VkImageView_T*)pCreateInfo->pAttachments[i])->image->name
-        );
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, 	GL_TEXTURE_2D,
-            ((VkImageView_T*)pCreateInfo->pAttachments[i])->image->name, 0
-        );
-    }
     
-    check(glCheckFramebufferStatus(GL_FRAMEBUFFER));
+    for (auto i = 0u; i < pCreateInfo->attachmentCount; ++i) {
+        framebuffer->attachments[i] = pCreateInfo->pAttachments[i];
+    }
     
     *pFramebuffer = (VkFramebuffer)framebuffer;
     return VK_SUCCESS;
@@ -781,8 +774,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyFramebuffer(
     const VkAllocationCallbacks* pAllocator
 ) {
     VkFramebuffer_T* internal_framebuffer = (VkFramebuffer_T*)framebuffer;
-    if (internal_framebuffer->name != 0)
-        glDeleteFramebuffers(1, &internal_framebuffer->name);
+    delete internal_framebuffer;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
@@ -791,7 +783,20 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
     const VkAllocationCallbacks* pAllocator,
     VkRenderPass* pRenderPass
 ) {
-    *pRenderPass = (VkRenderPass)new VkRenderPass_T;
+    VkRenderPass_T* render_pass = new VkRenderPass_T;
+    render_pass->color_attachment_count = 
+        pCreateInfo->pSubpasses[0].colorAttachmentCount;
+    for (int i = 0; i < render_pass->color_attachment_count; ++i) {
+        render_pass->color_attachments[i] = 
+            pCreateInfo->pSubpasses[0].pColorAttachments[i].attachment;
+    }
+    auto depth_attachment = pCreateInfo->pSubpasses[0].pDepthStencilAttachment;
+    if (depth_attachment)
+        render_pass->depth_attachment = depth_attachment->attachment;
+    auto resolve_attachment = pCreateInfo->pSubpasses[0].pResolveAttachments;
+    if (resolve_attachment)
+        render_pass->resolve_attachments = resolve_attachment->attachment;
+    *pRenderPass = (VkRenderPass)render_pass;
     return VK_SUCCESS;
 }
 
@@ -1190,29 +1195,65 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
 
 }
 
+struct framebuffer_deleter {
+    void operator()(GLuint* framebuffer) const {
+        glDeleteFramebuffers(1, framebuffer);
+    }
+};
+
+typedef std::unique_ptr<GLuint, framebuffer_deleter> unique_framebuffer;
+
 VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
     VkCommandBuffer commandBuffer,
     const VkRenderPassBeginInfo* pRenderPassBegin,
     VkSubpassContents contents
 ) {
-    GLuint framebuffer = 
-        ((VkFramebuffer_T*)pRenderPassBegin->framebuffer)->name;
+    unique_framebuffer framebuffer(new GLuint[2]);
+    glGenFramebuffers(2, framebuffer.get());
+    glBindFramebuffer(GL_FRAMEBUFFER, *framebuffer);
+
+    VkRenderPass_T* render_pass = (VkRenderPass_T*)pRenderPassBegin->renderPass;
+    auto& attachments = 
+        ((VkFramebuffer_T*)pRenderPassBegin->framebuffer)->attachments;
+
+    for (auto i = 0; i < render_pass->color_attachment_count; i++) {
+        GLuint texture = 
+            attachments[render_pass->color_attachments[i]]->image->name;
+        //glBindTexture(GL_TEXTURE_2D, texture);
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, 	GL_TEXTURE_2D,
+            texture, 0
+        );
+    }
+    
+    GLuint texture = attachments[render_pass->depth_attachment]->image->name;
+    //glBindTexture(GL_TEXTURE_2D, texture);
+    glFramebufferTexture2D(
+        GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
+        texture, 0
+    );
+    
+    check(glCheckFramebufferStatus(GL_FRAMEBUFFER));
+
     auto color = pRenderPassBegin->pClearValues->color;
 
     if (
         !commandBuffer->gl_state.draw_framebuffer_set ||
-        commandBuffer->gl_state.draw_framebuffer != framebuffer
+        commandBuffer->gl_state.draw_framebuffer != *framebuffer
     ) {
-        add_command(commandBuffer, [framebuffer, color](){
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
-            glClearColor(
-                color.float32[0], color.float32[1], 
-                color.float32[2], color.float32[3]
-            );
-            glClear(GL_COLOR_BUFFER_BIT);
-        });
         commandBuffer->gl_state.draw_framebuffer_set = true;
-        commandBuffer->gl_state.draw_framebuffer = framebuffer;
+        commandBuffer->gl_state.draw_framebuffer = *framebuffer;
+        add_command(
+            commandBuffer, 
+            [framebuffer = std::move(framebuffer), color](){
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, *framebuffer);
+                glClearColor(
+                    color.float32[0], color.float32[1], 
+                    color.float32[2], color.float32[3]
+                );
+                glClear(GL_COLOR_BUFFER_BIT);
+            }
+        );
 
     } else {
         add_command(commandBuffer, [color](){
