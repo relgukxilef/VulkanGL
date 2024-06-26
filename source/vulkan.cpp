@@ -20,22 +20,21 @@
 
 #include <spirv_glsl.hpp>
 
-#include "globals.h"
+#include "vulkan_private.h"
 #include "enumerates.h"
 #include "spirv.hpp"
 
-// TODO: move structs to header file
-// TODO: move globals to namespace
+namespace vgl {
+    VkPhysicalDevice_T* global_physical_device;
+    gl_extent_2d current_surface_extent;
+    VkDevice_T* global_device;
+    VkQueue_T global_queue;
+    VkDeviceSize device_memory, host_memory;
+}
 
-struct VkPhysicalDevice_T {} global_physical_device;
-
-struct VkDevice_T {
-    GLuint copy_framebuffer;
-} * global_device;
 struct VkCommandPool_T {
     std::unique_ptr<struct VkCommandBuffer_T> buffers;
 };
-struct VkQueue_T {} global_queue;
 struct VkSemaphore_T {};
 struct VkDeviceMemory_T {
     // TODO: for some buffer usages (e.g. VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)
@@ -200,7 +199,7 @@ vkEnumeratePhysicalDevices(
     VkPhysicalDevice* pPhysicalDevices
 ) {
     if (pPhysicalDevices && *pPhysicalDeviceCount >= 1) {
-        pPhysicalDevices[0] = &global_physical_device;
+        pPhysicalDevices[0] = vgl::global_physical_device;
     } 
     *pPhysicalDeviceCount = 1;
     return VK_SUCCESS;
@@ -236,7 +235,36 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties(
     VkPhysicalDevice physicalDevice,
     VkPhysicalDeviceMemoryProperties* pMemoryProperties
-) {}
+) {
+    static VkPhysicalDeviceMemoryProperties properties{
+        .memoryTypeCount = 4,
+        .memoryTypes = {
+            { // TODO
+                0, 1
+            }, {
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0
+            }, {
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                1
+            }, {
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+                0
+            }
+        },
+        .memoryHeapCount = 2,
+        .memoryHeaps = {
+            {
+                .size = vgl::device_memory,
+                .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT
+            },
+            {.size = vgl::host_memory, .flags = 0},
+        },
+    };
+    *pMemoryProperties = properties;
+}
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     VkPhysicalDevice physicalDevice,
@@ -245,7 +273,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     VkDevice* pDevice
 ) {
     *pDevice = new VkDevice_T;
-    global_device = *pDevice;
+    vgl::global_device = *pDevice;
     glGenFramebuffers(1, &(*pDevice)->copy_framebuffer);
     return VK_SUCCESS;
 }
@@ -254,7 +282,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(
     VkDevice device,
     const VkAllocationCallbacks* pAllocator
 ) {
-    global_device = nullptr;
+    vgl::global_device = nullptr;
     delete device;
 }
 
@@ -832,7 +860,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(
     uint32_t queueIndex,
     VkQueue* pQueue
 ) {
-    *pQueue = &global_queue;
+    *pQueue = &vgl::global_queue;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(
@@ -1337,6 +1365,13 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySemaphore(
     delete (VkSemaphore_T*)semaphore;
 }
 
+VKAPI_ATTR void vkGetPhysicalDeviceProperties(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceProperties* pProperties
+) {
+    *pProperties = ((VkPhysicalDevice_T*)physicalDevice)->device_properties;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     VkDevice device,
     const VkSwapchainCreateInfoKHR* pCreateInfo,
@@ -1356,8 +1391,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
             .name = name,
             .internal_format = 
                 gl_format(pCreateInfo->imageFormat).internal_format,
-            .width = current_surface_extent.width,
-            .height = current_surface_extent.height,
+            .width = vgl::current_surface_extent.width,
+            .height = vgl::current_surface_extent.height,
             .depth = 1,
         }
     };
@@ -1396,8 +1431,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
         .minImageCount = 1,
         .maxImageCount = 1,
         .currentExtent = { 
-            .width = (uint32_t)current_surface_extent.width, 
-            .height = (uint32_t)current_surface_extent.height 
+            .width = (uint32_t)vgl::current_surface_extent.width,
+            .height = (uint32_t)vgl::current_surface_extent.height
         },
         .minImageExtent = {
             .width = 1,
@@ -1480,17 +1515,87 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDebugUtilsMessengerEXT(
     delete (VkDebugUtilsMessengerEXT_T*)messenger;
 }
 
+VKAPI_ATTR PFN_vkVoidFunction vkGetDeviceProcAddr(
+    VkDevice device,
+    const char* pName
+) {
+    return vkGetInstanceProcAddr(nullptr, pName);
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     VkInstance instance,
     const char* pName
 ) {
-    if (strcmp(pName, "vkCreateDebugUtilsMessengerEXT") == 0) {
-        return (PFN_vkVoidFunction)vkCreateDebugUtilsMessengerEXT;
+    std::initializer_list<std::pair<const char*, PFN_vkVoidFunction>> map = {
+        {
+            "vkCreateDebugUtilsMessengerEXT",
+            (PFN_vkVoidFunction)vkCreateDebugUtilsMessengerEXT
+        }, {
+            "vkDestroyDebugUtilsMessengerEXT",
+            (PFN_vkVoidFunction)vkDestroyDebugUtilsMessengerEXT
+        }, {
+            "vkGetPhysicalDeviceProperties",
+            (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties
+        }, {
+            "vkGetPhysicalDeviceMemoryProperties",
+            (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties
+        }, {
+            "vkAllocateMemory",
+            (PFN_vkVoidFunction)vkAllocateMemory
+        }, {
+            "vkFreeMemory",
+            (PFN_vkVoidFunction)vkFreeMemory
+        }, {
+            "vkMapMemory",
+            (PFN_vkVoidFunction)vkMapMemory
+        }, {
+            "vkUnmapMemory",
+            (PFN_vkVoidFunction)vkUnmapMemory
+        }, {
+            "vkFlushMappedMemoryRanges",
+            (PFN_vkVoidFunction)vkFlushMappedMemoryRanges
+        }, {
+            "vkInvalidateMappedMemoryRanges",
+            (PFN_vkVoidFunction)vkInvalidateMappedMemoryRanges
+        }, {
+            "vkBindBufferMemory",
+            (PFN_vkVoidFunction)vkBindBufferMemory
+        }, {
+            "vkBindImageMemory",
+            (PFN_vkVoidFunction)vkBindImageMemory
+        }, {
+            "vkGetBufferMemoryRequirements",
+            (PFN_vkVoidFunction)vkGetBufferMemoryRequirements
+        }, {
+            "vkGetImageMemoryRequirements",
+            (PFN_vkVoidFunction)vkGetImageMemoryRequirements
+        }, {
+            "vkCreateBuffer",
+            (PFN_vkVoidFunction)vkCreateBuffer
+        }, {
+            "vkDestroyBuffer",
+            (PFN_vkVoidFunction)vkDestroyBuffer
+        }, {
+            "vkCreateImage",
+            (PFN_vkVoidFunction)vkCreateImage
+        }, {
+            "vkDestroyImage",
+            (PFN_vkVoidFunction)vkDestroyImage
+        }, {
+            "vkCmdCopyBuffer",
+            (PFN_vkVoidFunction)vkCmdCopyBuffer
+        }, {
+            "vkGetInstanceProcAddr",
+            (PFN_vkVoidFunction)vkGetInstanceProcAddr
+        },
+    };
+
+    for (auto f : map) {
+        if (strcmp(pName, f.first) == 0) {
+            return f.second;
+        }
     }
-    
-    if (strcmp(pName, "vkDestroyDebugUtilsMessengerEXT") == 0) {
-        return (PFN_vkVoidFunction)vkDestroyDebugUtilsMessengerEXT;
-    }
+
     return nullptr;
 }
 
@@ -1504,8 +1609,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
 ) {
     auto internal_swapchain = (VkSwapchainKHR_T*)swapchain;
     if (
-        internal_swapchain->image.width == current_surface_extent.width &&
-        internal_swapchain->image.height == current_surface_extent.height
+        internal_swapchain->image.width == vgl::current_surface_extent.width &&
+        internal_swapchain->image.height == vgl::current_surface_extent.height
     ) {
         *pImageIndex = 0;
         return VK_SUCCESS;
@@ -1553,12 +1658,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
     if (pPresentInfo->swapchainCount > 0) {
         auto image = ((VkSwapchainKHR_T*)pPresentInfo->pSwapchains[0])->image;
         if (
-            current_surface_extent.width == image.width && 
-            current_surface_extent.height == image.height
+            vgl::current_surface_extent.width == image.width &&
+            vgl::current_surface_extent.height == image.height
         ) {
             // TODO: optimize away copy
             glBindFramebuffer(
-                GL_READ_FRAMEBUFFER, global_device->copy_framebuffer
+                GL_READ_FRAMEBUFFER, vgl::global_device->copy_framebuffer
             );
             glFramebufferTexture2D(
                 GL_READ_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
