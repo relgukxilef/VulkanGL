@@ -1287,7 +1287,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
                 color.float32[0], color.float32[1], 
                 color.float32[2], color.float32[3]
             );
-            glClear(GL_COLOR_BUFFER_BIT);
+            glEnable(GL_DEPTH_TEST);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
     );
 }
