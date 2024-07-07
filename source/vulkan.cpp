@@ -1206,6 +1206,16 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(
     // and read it here to call glDraw...
 }
 
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBuffer(
+    VkCommandBuffer commandBuffer,
+    VkBuffer srcBuffer,
+    VkBuffer dstBuffer,
+    uint32_t regionCount,
+    const VkBufferCopy* pRegions
+) {
+    // TODO
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(
     VkCommandBuffer commandBuffer,
     VkBuffer srcBuffer,
