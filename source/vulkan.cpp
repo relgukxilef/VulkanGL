@@ -635,7 +635,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
             auto binding = bindings[attribute.binding];
             auto format = gl_format(attribute.format);
             pipeline.p.vertex[attribute.location] = {
-                .offset = attribute.offset,
+                .offset = static_cast<GLintptr>(attribute.offset),
                 .stride = static_cast<GLsizei>(binding.stride),
                 .type = format.type,
                 .element_size = format.size,
@@ -794,7 +794,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
     auto framebuffer = new VkFramebuffer_T;
     
     for (auto i = 0u; i < pCreateInfo->attachmentCount; ++i) {
-        framebuffer->attachments[i] = pCreateInfo->pAttachments[i];
+        framebuffer->attachments[i] = 
+            (const VkImageView_T*)pCreateInfo->pAttachments[i];
     }
     
     *pFramebuffer = (VkFramebuffer)framebuffer;
@@ -1050,10 +1051,11 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(
     VkDeviceSize offset,
     VkIndexType indexType
 ) {
+    VkBuffer_T* internal = (VkBuffer_T*)buffer;
     commandBuffer->index_type = indexType;
-    commandBuffer->gl_state.index.buffer = buffer->memory->buffer_object;
-    commandBuffer->gl_state.index.offset = buffer->offset + offset;
-    commandBuffer->gl_state.index.size = buffer->size;
+    commandBuffer->gl_state.index.buffer = internal->memory->buffer_object;
+    commandBuffer->gl_state.index.offset = internal->offset + offset;
+    commandBuffer->gl_state.index.size = internal->size;
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
@@ -1064,7 +1066,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
     const VkDeviceSize* pOffsets
 ) {
     for (auto i = 0u; i < bindingCount; i++) {
-        const VkBuffer buffer = pBuffers[i];
+        const VkBuffer_T* buffer = (VkBuffer_T*)pBuffers[i];
         auto binding = i + firstBinding;
         commandBuffer->gl_state.vertex[binding] = {
             .buffer = buffer->memory->buffer_object,
@@ -1486,7 +1488,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     return VK_SUCCESS;
 }
 
-void GLAD_API_PTR write_debug_message(
+void write_debug_message(
     GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, 
     const GLchar* message, const void*
 ) {
@@ -1519,6 +1521,9 @@ void GLAD_API_PTR write_debug_message(
     }
 }
 
+#define GL_DEBUG_OUTPUT 0x92E0
+#define GL_DEBUG_OUTPUT_SYNCHRONOUS 0x8242
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDebugUtilsMessengerEXT(
     VkInstance instance,
     const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
@@ -1528,12 +1533,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDebugUtilsMessengerEXT(
     glEnable(GL_DEBUG_OUTPUT);
     glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
     glDebugMessageCallback(write_debug_message, nullptr);
-    *pMessenger = (VkDebugUtilsMessengerEXT)new VkDebugUtilsMessengerEXT_T{
+    debug_messengers = new VkDebugUtilsMessengerEXT_T{
         pCreateInfo->pUserData,
         pCreateInfo->pfnUserCallback,
         debug_messengers
     };
-    debug_messengers = *pMessenger;
+    *pMessenger = (VkDebugUtilsMessengerEXT)debug_messengers;
     return VK_SUCCESS;
 }
 
@@ -1542,12 +1547,13 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDebugUtilsMessengerEXT(
     VkDebugUtilsMessengerEXT messenger,
     const VkAllocationCallbacks* pAllocator
 ) {
+    auto internal = (VkDebugUtilsMessengerEXT_T*)messenger;
     VkDebugUtilsMessengerEXT_T** m = &debug_messengers;
-    while (*m != messenger) {
+    while (*m != internal) {
         m = &(*m)->next;
     }
     *m = (*m)->next;
-    delete (VkDebugUtilsMessengerEXT_T*)messenger;
+    delete internal;
 }
 
 VKAPI_ATTR PFN_vkVoidFunction vkGetDeviceProcAddr(

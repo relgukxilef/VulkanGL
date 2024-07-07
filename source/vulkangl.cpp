@@ -41,25 +41,6 @@ VkInstance vglCreateInstanceForGL() {
         .memory_properties = properties,
     };
 
-    auto vendor = (const char*)glGetString(GL_VENDOR);
-    auto renderer = (const char*)glGetString(GL_RENDERER);
-    auto vendor_length = std::strlen(vendor);
-    auto renderer_length = std::strlen(renderer);
-
-    auto& name = vgl::global_physical_device->device_properties.deviceName;
-    memcpy(
-        name, vendor,
-        std::min<size_t>(vendor_length, VK_MAX_PHYSICAL_DEVICE_NAME_SIZE)
-    );
-    name[vendor_length] = ' ';
-    memcpy(
-        name + vendor_length + 1, renderer,
-        std::min<size_t>(
-            renderer_length,
-            VK_MAX_PHYSICAL_DEVICE_NAME_SIZE - vendor_length - 1
-        )
-    );
-
     return &global_instance;
 }
 
