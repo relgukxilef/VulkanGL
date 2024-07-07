@@ -7,6 +7,7 @@
 
 struct VkPhysicalDevice_T {
     VkPhysicalDeviceProperties device_properties;
+    VkPhysicalDeviceMemoryProperties memory_properties;
 };
 
 struct gl_extent_2d {
@@ -26,3 +27,27 @@ namespace vgl {
     extern VkQueue_T global_queue;
     extern VkDeviceSize device_memory, host_memory;
 }
+
+struct memory_type_info {
+    GLenum default_binding;
+    VkBufferUsageFlags buffer_usage;
+    VkImageUsageFlags image_usage;
+};
+
+const memory_type_info memory_types[] = {
+    {
+        GL_ARRAY_BUFFER, 
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | 
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, 
+        0
+    }, { // ELEMENT_ARRAY_BUFFER in WebGL can not be bound to other targets
+        GL_ELEMENT_ARRAY_BUFFER,
+        VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+        0
+    }, {
+        GL_NONE,
+        0,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+        VK_IMAGE_USAGE_SAMPLED_BIT
+    },
+};

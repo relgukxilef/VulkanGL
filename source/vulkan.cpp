@@ -40,18 +40,21 @@ struct VkDeviceMemory_T {
     // TODO: for some buffer usages (e.g. VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)
     // don't need to be stored on the GPU
     std::unique_ptr<char[]> mapping;
-    GLuint vertex_buffer_object;
+    GLuint buffer_object;
+    unsigned memory_index;
 };
 struct VkBuffer_T {
     VkDeviceMemory_T* memory;
     unsigned size;
     unsigned offset;
+    VkBufferUsageFlags usage;
 };
 struct VkImage_T {
     GLuint name;
     GLenum internal_format;
     GLsizei width, height, depth;
     GLsizei levels;
+    VkImageUsageFlags usage;
 };
 struct VkSwapchainKHR_T {
     VkImage_T image;
@@ -88,7 +91,7 @@ struct VkDescriptorSetLayout_T {
 };
 
 struct buffer_range_bindings {
-    GLuint vertex_buffer_object;
+    GLuint buffer_object;
     GLintptr offset;
     GLsizeiptr size;
 };
@@ -105,9 +108,9 @@ struct VkFramebuffer_T {
 
 struct VkRenderPass_T {
     // only support single subpass for now
-    std::size_t depth_attachment;
     std::size_t color_attachments[8];
-    std::size_t resolve_attachments;
+    std::size_t depth_attachment = ~0;
+    std::size_t resolve_attachments = ~0;
     unsigned color_attachment_count;
 };
 
@@ -151,6 +154,7 @@ struct VkPipeline_T {
 
 struct VkCommandBuffer_T {
     std::unique_ptr<VkCommandBuffer_T> buffer_next;
+    GLuint current_resolve_texture = 0;
 
     struct {
         // TODO: need to be able to encode part of the state being unknown
@@ -173,7 +177,7 @@ struct VkCommandBuffer_T {
         } vertex[8];
     } gl_state;
     GLenum primitive_type;
-    GLenum index_type;
+    VkIndexType index_type;
 
     std::unique_ptr<command> first, * next = &first;
 };
@@ -236,34 +240,8 @@ VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties(
     VkPhysicalDevice physicalDevice,
     VkPhysicalDeviceMemoryProperties* pMemoryProperties
 ) {
-    static VkPhysicalDeviceMemoryProperties properties{
-        .memoryTypeCount = 4,
-        .memoryTypes = {
-            { // TODO
-                0, 1
-            }, {
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0
-            }, {
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                1
-            }, {
-                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
-                0
-            }
-        },
-        .memoryHeapCount = 2,
-        .memoryHeaps = {
-            {
-                .size = vgl::device_memory,
-                .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT
-            },
-            {.size = vgl::host_memory, .flags = 0},
-        },
-    };
-    *pMemoryProperties = properties;
+    *pMemoryProperties = 
+        ((VkPhysicalDevice_T*)physicalDevice)->memory_properties;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
@@ -282,6 +260,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(
     VkDevice device,
     const VkAllocationCallbacks* pAllocator
 ) {
+    glDeleteFramebuffers(1, &device->copy_framebuffer);
     vgl::global_device = nullptr;
     delete device;
 }
@@ -293,15 +272,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
     VkDeviceMemory* pMemory
 ) {
     GLuint buffer;
+    GLenum buffer_type = 
+        memory_types[pAllocateInfo->memoryTypeIndex].default_binding;
+    if (buffer_type == GL_NONE) {
+        // Don't need memory for images
+        *pMemory = (VkDeviceMemory)new VkDeviceMemory_T {
+            .mapping = nullptr,
+            .buffer_object = 0,
+        };
+        return VK_SUCCESS;
+    }
+
     glGenBuffers(1, &buffer);
-    glBindBuffer(GL_UNIFORM_BUFFER, buffer);
+    glBindBuffer(buffer_type, buffer);
     glBufferData(
-        GL_UNIFORM_BUFFER, pAllocateInfo->allocationSize, nullptr,
-        GL_DYNAMIC_COPY
+        buffer_type, pAllocateInfo->allocationSize, nullptr, GL_DYNAMIC_COPY
     );
     *pMemory = (VkDeviceMemory)new VkDeviceMemory_T {
         .mapping = std::make_unique<char[]>(pAllocateInfo->allocationSize),
-        .vertex_buffer_object = buffer,
+        .buffer_object = buffer,
     };
     return VK_SUCCESS;
 }
@@ -312,7 +301,7 @@ VKAPI_ATTR void VKAPI_CALL vkFreeMemory(
     const VkAllocationCallbacks* pAllocator
 ) {
     auto internal = (VkDeviceMemory_T*)memory;
-    glDeleteBuffers(1, &internal->vertex_buffer_object);
+    glDeleteBuffers(1, &internal->buffer_object);
     delete internal;
 }
 
@@ -344,11 +333,13 @@ VKAPI_ATTR VkResult VKAPI_CALL vkFlushMappedMemoryRanges(
     for (auto i = 0u; i < memoryRangeCount; i++) {
         VkMappedMemoryRange range = pMemoryRanges[i];
         auto internal = (VkDeviceMemory_T*)range.memory;
+        auto binding_point = 
+            memory_types[internal->memory_index].default_binding;
         glBindBuffer(
-            GL_COPY_WRITE_BUFFER, internal->vertex_buffer_object
+            binding_point, internal->buffer_object
         );
         glBufferSubData(
-            GL_UNIFORM_BUFFER, range.offset, range.size,
+            binding_point, range.offset, range.size,
             internal->mapping.get() + range.offset
         );
     }
@@ -381,7 +372,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(
     VkDeviceMemory memory,
     VkDeviceSize memoryOffset
 ) {
-    // TODO
+    // Nothing to do
     return VK_SUCCESS;
 }
 
@@ -393,7 +384,13 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
     auto internal = (VkBuffer_T*)buffer;
     pMemoryRequirements->alignment = 1;
     pMemoryRequirements->size = internal->size;
-    pMemoryRequirements->memoryTypeBits = ~0;
+    pMemoryRequirements->memoryTypeBits = 0;
+    uint32_t bits = 1;
+    for (auto memory_type : memory_types) {
+        if (internal->usage & memory_type.buffer_usage)
+            pMemoryRequirements->memoryTypeBits = bits;
+        bits <<= 1;
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
@@ -407,7 +404,13 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
         internal->width * internal->height * internal->depth * 4;
     // TODO: handle levels > 1
     // TODO: check image format
-    pMemoryRequirements->memoryTypeBits = ~0;
+    pMemoryRequirements->memoryTypeBits = 0;
+    uint32_t bits = 1;
+    for (auto memory_type : memory_types) {
+        if (internal->usage & memory_type.image_usage)
+            pMemoryRequirements->memoryTypeBits = bits;
+        bits <<= 1;
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
@@ -418,6 +421,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
 ) {
     *pBuffer = (VkBuffer)new VkBuffer_T {
         .size = (unsigned)pCreateInfo->size,
+        .usage = pCreateInfo->usage,
     };
     return VK_SUCCESS;
 }
@@ -442,6 +446,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
         .height = (GLsizei)pCreateInfo->extent.height,
         .depth = (GLsizei)pCreateInfo->extent.depth,
         .levels = (GLsizei)pCreateInfo->mipLevels,
+        .usage = pCreateInfo->usage,
     };
     glGenTextures(1, &internal->name);
     if (pCreateInfo->extent.depth == 1 && pCreateInfo->arrayLayers == 1) {
@@ -547,7 +552,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
             .flip_vert_y = true,
         }
     };
-	compiler.set_common_options(options);
+    compiler.set_common_options(options);
     
     shader_module.glsl = compiler.compile();
 
@@ -768,7 +773,7 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
         auto& binding = set->bindings[write.dstBinding];
         if (write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
             auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
-            binding.vertex_buffer_object = buffer->memory->vertex_buffer_object;
+            binding.buffer_object = buffer->memory->buffer_object;
             binding.offset = buffer->offset + write.pBufferInfo->offset;
             binding.size = write.pBufferInfo->range;
 
@@ -1033,7 +1038,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
             auto set = sets[i];
             glBindBufferRange(
                 GL_UNIFORM_BUFFER, firstSet + i,
-                set.vertex_buffer_object, set.offset, set.size
+                set.buffer_object, set.offset, set.size
             );
         }
     });
@@ -1045,8 +1050,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(
     VkDeviceSize offset,
     VkIndexType indexType
 ) {
-    commandBuffer->index_type = gl_index_type(indexType);
-    commandBuffer->gl_state.index.buffer = buffer->memory->vertex_buffer_object;
+    commandBuffer->index_type = indexType;
+    commandBuffer->gl_state.index.buffer = buffer->memory->buffer_object;
     commandBuffer->gl_state.index.offset = buffer->offset + offset;
     commandBuffer->gl_state.index.size = buffer->size;
 }
@@ -1062,7 +1067,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
         const VkBuffer buffer = pBuffers[i];
         auto binding = i + firstBinding;
         commandBuffer->gl_state.vertex[binding] = {
-            .buffer = buffer->memory->vertex_buffer_object,
+            .buffer = buffer->memory->buffer_object,
             .offset = static_cast<GLintptr>(pOffsets[i] + buffer->offset),
             .size = buffer->size,
             .bound = true,
@@ -1142,7 +1147,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
     uint32_t firstInstance
 ) {
     GLenum primitive_type = commandBuffer->primitive_type;
-    GLenum index_type = commandBuffer->index_type;
+    auto index_type = gl_index_type(commandBuffer->index_type);
     unique_vertex_array_object vertex_array;
     glGenVertexArrays(1, out_ptr(vertex_array));
     glBindVertexArray(vertex_array.value);
@@ -1150,6 +1155,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
         GL_ELEMENT_ARRAY_BUFFER,
         commandBuffer->gl_state.index.buffer
     );
+    unsigned index_offset = 
+        commandBuffer->gl_state.index.offset + firstIndex * index_type.size;
+    GLenum gl_index_type = index_type.type;
     for (auto i = 0u; i < 8; i++) {
         if (commandBuffer->gl_state.vertex[i].bound) {
             glBindBuffer(
@@ -1176,7 +1184,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
             commandBuffer, [=, vertex_array = std::move(vertex_array)](){
                 glBindVertexArray(vertex_array.value);
                 glDrawElements(
-                    primitive_type, indexCount, index_type, nullptr
+                    primitive_type, indexCount, gl_index_type, 
+                    (void*)index_offset
                 );
             }
         );
@@ -1205,7 +1214,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(
     uint32_t regionCount,
     const VkBufferImageCopy* pRegions
 ) {
-    // TODO
+    // TODO: bind buffer to GL_PIXEL_UNPACK_BUFFER and call glTexSubImage2D
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
@@ -1236,8 +1245,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
     const VkRenderPassBeginInfo* pRenderPassBegin,
     VkSubpassContents contents
 ) {
-    unique_framebuffer framebuffer(new GLuint[2]);
-    glGenFramebuffers(2, framebuffer.get());
+    unique_framebuffer framebuffer(new GLuint(0));
+    glGenFramebuffers(1, framebuffer.get());
     glBindFramebuffer(GL_FRAMEBUFFER, *framebuffer);
 
     VkRenderPass_T* render_pass = (VkRenderPass_T*)pRenderPassBegin->renderPass;
@@ -1247,15 +1256,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
     for (auto i = 0; i < render_pass->color_attachment_count; i++) {
         GLuint texture = 
             attachments[render_pass->color_attachments[i]]->image->name;
-        //glBindTexture(GL_TEXTURE_2D, texture);
         glFramebufferTexture2D(
-            GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, 	GL_TEXTURE_2D,
+            GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D,
             texture, 0
         );
     }
     
     GLuint texture = attachments[render_pass->depth_attachment]->image->name;
-    //glBindTexture(GL_TEXTURE_2D, texture);
     glFramebufferTexture2D(
         GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
         texture, 0
@@ -1263,40 +1270,57 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
     
     check(glCheckFramebufferStatus(GL_FRAMEBUFFER));
 
+    if (render_pass->resolve_attachments != ~0) {
+        commandBuffer->current_resolve_texture = 
+            attachments[render_pass->resolve_attachments]->image->name;
+    }
+
     auto color = pRenderPassBegin->pClearValues->color;
 
-    if (
-        !commandBuffer->gl_state.draw_framebuffer_set ||
-        commandBuffer->gl_state.draw_framebuffer != *framebuffer
-    ) {
-        commandBuffer->gl_state.draw_framebuffer_set = true;
-        commandBuffer->gl_state.draw_framebuffer = *framebuffer;
-        add_command(
-            commandBuffer, 
-            [framebuffer = std::move(framebuffer), color](){
-                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, *framebuffer);
-                glClearColor(
-                    color.float32[0], color.float32[1], 
-                    color.float32[2], color.float32[3]
-                );
-                glClear(GL_COLOR_BUFFER_BIT);
-            }
-        );
-
-    } else {
-        add_command(commandBuffer, [color](){
+    commandBuffer->gl_state.draw_framebuffer_set = true;
+    commandBuffer->gl_state.draw_framebuffer = *framebuffer;
+    add_command(
+        commandBuffer, 
+        [framebuffer = std::move(framebuffer), color](){
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, *framebuffer);
             glClearColor(
                 color.float32[0], color.float32[1], 
                 color.float32[2], color.float32[3]
             );
             glClear(GL_COLOR_BUFFER_BIT);
-        });
-    }
+        }
+    );
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(
     VkCommandBuffer commandBuffer
 ) {
+    if (commandBuffer->current_resolve_texture != ~0) {
+        unique_framebuffer framebuffer(new GLuint(0));
+        glGenFramebuffers(1, framebuffer.get());
+        glBindFramebuffer(GL_FRAMEBUFFER, *framebuffer);
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+            commandBuffer->current_resolve_texture, 0
+        );
+
+        check(glCheckFramebufferStatus(GL_FRAMEBUFFER));
+
+        GLuint color_framebuffer = commandBuffer->gl_state.draw_framebuffer;
+
+        add_command(
+            commandBuffer, 
+            [=, framebuffer = std::move(framebuffer)](){
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, color_framebuffer);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, *framebuffer);
+                glBlitFramebuffer(
+                    0, 0, 0x7fffffff, 0x7fffffff, 
+                    0, 0, 0x7fffffff, 0x7fffffff,
+                    GL_COLOR_BUFFER_BIT, GL_NEAREST
+                );
+            }
+        );  
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateFence(
@@ -1587,6 +1611,12 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
         }, {
             "vkGetInstanceProcAddr",
             (PFN_vkVoidFunction)vkGetInstanceProcAddr
+        }, {
+            "vkGetBufferMemoryRequirements2KHR",
+            (PFN_vkVoidFunction)vkGetBufferMemoryRequirements2KHR
+        }, {
+            "vkGetImageMemoryRequirements2KHR",
+            (PFN_vkVoidFunction)vkGetImageMemoryRequirements2KHR
         },
     };
 
@@ -1693,3 +1723,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(
     // TODO
     return VK_SUCCESS;
 }
+
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2KHR(
+    VkDevice device,
+    const VkImageMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    vkGetImageMemoryRequirements(
+        device, pInfo->image, &pMemoryRequirements->memoryRequirements
+    );
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2KHR(
+    VkDevice device,
+    const VkBufferMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    vkGetBufferMemoryRequirements(
+        device, pInfo->buffer, &pMemoryRequirements->memoryRequirements
+    );
+}
+
+

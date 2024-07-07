@@ -5,7 +5,7 @@
 
 #include <GLES3/gl3.h>
 
-const char *gl_error_string(GLenum error) {
+const char* gl_error_string(GLenum error) {
     switch (error) {
         case GL_NO_ERROR: 
         case GL_FRAMEBUFFER_COMPLETE:
@@ -68,7 +68,7 @@ format_info gl_format(VkFormat format) {
         fprintf(stderr, "Unknown format %i\n", format);
         return {GL_R8, 1, GL_FLOAT};
     }
-};
+}
 
 GLenum gl_shader_type(VkShaderStageFlagBits stage) {
     switch (stage) {
@@ -80,7 +80,7 @@ GLenum gl_shader_type(VkShaderStageFlagBits stage) {
         fprintf(stderr, "Unknown shader stage %i\n", stage);
         return GL_VERTEX_SHADER;
     }
-};
+}
 
 GLenum gl_primitive_type(VkPrimitiveTopology topology) {
     switch (topology) {
@@ -92,18 +92,18 @@ GLenum gl_primitive_type(VkPrimitiveTopology topology) {
         fprintf(stderr, "Unknown primitive topology %i\n", topology);
         return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     }
-};
+}
 
-GLenum gl_index_type(VkIndexType type) {
+index_info gl_index_type(VkIndexType type) {
     switch (type) {
     case VK_INDEX_TYPE_UINT32:
-        return GL_UNSIGNED_INT;
+        return {4, GL_UNSIGNED_INT};
     case VK_INDEX_TYPE_UINT16:
-        return GL_UNSIGNED_SHORT;
+        return {2, GL_UNSIGNED_SHORT};
     case VK_INDEX_TYPE_UINT8_EXT:
-        return GL_UNSIGNED_BYTE;
+        return {1, GL_UNSIGNED_BYTE};
     default:
         fprintf(stderr, "Unknown index type %i\n", type);
-        return GL_UNSIGNED_SHORT;
+        return {0, GL_UNSIGNED_SHORT};
     }
-};
+}

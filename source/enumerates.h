@@ -10,6 +10,11 @@ struct format_info {
     GLenum type;
 };
 
+struct index_info {
+    GLint size;
+    GLenum type;
+};
+
 void check(GLenum result);
 
 format_info gl_format(VkFormat format);
@@ -18,4 +23,6 @@ GLenum gl_shader_type(VkShaderStageFlagBits);
 
 GLenum gl_primitive_type(VkPrimitiveTopology topology);
 
-GLenum gl_index_type(VkIndexType type);
+index_info gl_index_type(VkIndexType type);
+
+unsigned memory_type_index(VkBufferUsageFlags);
