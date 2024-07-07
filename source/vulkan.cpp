@@ -1071,7 +1071,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
         commandBuffer->gl_state.vertex[binding] = {
             .buffer = buffer->memory->buffer_object,
             .offset = static_cast<GLintptr>(pOffsets[i] + buffer->offset),
-            .size = buffer->size,
+            .size = static_cast<GLsizeiptr>(buffer->size),
             .bound = true,
         };
     }
@@ -1488,6 +1488,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     return VK_SUCCESS;
 }
 
+#define GL_DEBUG_SEVERITY_HIGH 0x9146
+#define GL_DEBUG_SEVERITY_LOW 0x9148
+#define GL_DEBUG_SEVERITY_MEDIUM 0x9147
+#define GL_DEBUG_SEVERITY_NOTIFICATION 0x826B
+
 void write_debug_message(
     GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, 
     const GLchar* message, const void*
@@ -1532,7 +1537,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDebugUtilsMessengerEXT(
 ) {
     glEnable(GL_DEBUG_OUTPUT);
     glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+#ifndef EMSCRIPTEN
     glDebugMessageCallback(write_debug_message, nullptr);
+#endif
     debug_messengers = new VkDebugUtilsMessengerEXT_T{
         pCreateInfo->pUserData,
         pCreateInfo->pfnUserCallback,
