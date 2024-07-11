@@ -1191,6 +1191,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
     if (instanceCount == 1) {
         add_command(
             commandBuffer, [=, vertex_array = std::move(vertex_array)](){
+                glBindTexture(GL_TEXTURE_2D, 0); // workaround
                 glBindVertexArray(vertex_array.value);
                 glDrawElements(
                     primitive_type, indexCount, gl_index_type, 
