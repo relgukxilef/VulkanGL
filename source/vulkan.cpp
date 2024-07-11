@@ -291,6 +291,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
     *pMemory = (VkDeviceMemory)new VkDeviceMemory_T {
         .mapping = std::make_unique<char[]>(pAllocateInfo->allocationSize),
         .buffer_object = buffer,
+        .memory_index = pAllocateInfo->memoryTypeIndex,
     };
     return VK_SUCCESS;
 }
