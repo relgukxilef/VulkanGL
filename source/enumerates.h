@@ -8,6 +8,7 @@ struct format_info {
     GLenum internal_format;
     GLint size;
     GLenum type;
+    bool filterable;
 };
 
 struct index_info {

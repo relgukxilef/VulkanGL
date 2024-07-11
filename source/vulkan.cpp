@@ -441,8 +441,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
     const VkAllocationCallbacks* pAllocator,
     VkImage* pImage
 ) {
+    auto format = gl_format(pCreateInfo->format);
     auto internal = new VkImage_T{
-        .internal_format = gl_format(pCreateInfo->format).internal_format,
+        .internal_format = format.internal_format,
         .width = (GLsizei)pCreateInfo->extent.width,
         .height = (GLsizei)pCreateInfo->extent.height,
         .depth = (GLsizei)pCreateInfo->extent.depth,
@@ -452,11 +453,16 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
     glGenTextures(1, &internal->name);
     if (pCreateInfo->extent.depth == 1 && pCreateInfo->arrayLayers == 1) {
         glBindTexture(GL_TEXTURE_2D, internal->name);
+        // TODO: Use Renderbuffers for images that are never read.
         glTexStorage2D(
             GL_TEXTURE_2D, pCreateInfo->mipLevels, 
             internal->internal_format,
             internal->width, internal->height
         );
+        if (!format.filterable) {
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        }
     } else if (pCreateInfo->arrayLayers == 1) {
         glBindTexture(GL_TEXTURE_3D, internal->name);
         glTexStorage3D(
