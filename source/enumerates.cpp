@@ -55,15 +55,20 @@ void check(GLenum result) {
 
 format_info gl_format(VkFormat format) {
     switch (format) {
-    case VK_FORMAT_R8G8B8_UNORM: return {GL_RGB8, 3, GL_UNSIGNED_BYTE, true};
-    case VK_FORMAT_R8G8B8A8_UNORM: return {GL_RGBA8, 4, GL_UNSIGNED_BYTE, true};
+    case VK_FORMAT_R8G8B8_UNORM: 
+        return {GL_RGB8, 3, GL_RGB, GL_UNSIGNED_BYTE, true};
+    case VK_FORMAT_R8G8B8A8_UNORM: 
+        return {GL_RGBA8, 4, GL_RGBA, GL_UNSIGNED_BYTE, true};
     case VK_FORMAT_A2B10G10R10_UNORM_PACK32: 
-        return {GL_RGB10_A2, 4, GL_UNSIGNED_INT_2_10_10_10_REV, true};
+        return {GL_RGB10_A2, 4, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, true};
     case VK_FORMAT_D24_UNORM_S8_UINT: 
-        return {GL_DEPTH24_STENCIL8, 1, GL_UNSIGNED_INT, false};
-    case VK_FORMAT_R32G32B32_SFLOAT: return {GL_RGB32F, 3, GL_FLOAT, false};
-    case VK_FORMAT_R32G32_SFLOAT: return {GL_RG32F, 2, GL_FLOAT, false};
-    case VK_FORMAT_R8G8B8A8_SRGB: return {GL_RGBA8, 4, GL_UNSIGNED_BYTE, false};
+        return {GL_DEPTH24_STENCIL8, 0, GL_NONE, GL_UNSIGNED_INT, false};
+    case VK_FORMAT_R32G32B32_SFLOAT: 
+        return {GL_RGB32F, 3, GL_RGB, GL_FLOAT, false};
+    case VK_FORMAT_R32G32_SFLOAT: 
+        return {GL_RG32F, 2, GL_RG, GL_FLOAT, false};
+    case VK_FORMAT_R8G8B8A8_SRGB: 
+        return {GL_RGBA8, 4, GL_RGBA, GL_UNSIGNED_BYTE, false};
     default:
         fprintf(stderr, "Unknown format %i\n", format);
         return {GL_R8, 1, GL_FLOAT, false};

@@ -52,6 +52,8 @@ struct VkBuffer_T {
 struct VkImage_T {
     GLuint name;
     GLenum internal_format;
+    GLenum format;
+    GLenum type;
     GLsizei width, height, depth;
     GLsizei levels;
     VkImageUsageFlags usage;
@@ -77,29 +79,29 @@ struct VkImageView_T {
 struct VkShaderModule_T {
     // shader
     std::string glsl;
+    unsigned sampler_ids[8]{0};
 };
 
-struct descriptor_set_layout {
-    GLuint binding;
+struct descriptor_set_layout_binding {
     unsigned count;
-    std::unique_ptr<VkSampler[]> immutable_samplers;
 };
 
 struct VkDescriptorSetLayout_T {
     unsigned count;
-    std::unique_ptr<descriptor_set_layout[]> bindings;
+    descriptor_set_layout_binding bindings[8];
 };
 
-struct buffer_range_bindings {
-    GLuint buffer_object;
+struct descriptor_set_binding {
+    GLuint buffer_object = 0;
     GLintptr offset;
     GLsizeiptr size;
+    GLuint texture = 0;
 };
 
 struct VkDescriptorSet_T {
     // safe to store the bindings here as Vulkan doesn't allow changing
     // descriptor sets after they are bound in a command buffer
-    std::unique_ptr<buffer_range_bindings[]> bindings;
+    descriptor_set_binding bindings[8];
 };
 
 struct VkFramebuffer_T {
@@ -178,6 +180,7 @@ struct VkCommandBuffer_T {
     } gl_state;
     GLenum primitive_type;
     VkIndexType index_type;
+    VkDescriptorSet_T* descriptor_set;
 
     std::unique_ptr<command> first, * next = &first;
 };
@@ -444,6 +447,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
     auto format = gl_format(pCreateInfo->format);
     auto internal = new VkImage_T{
         .internal_format = format.internal_format,
+        .format = format.format,
+        .type = format.type,
         .width = (GLsizei)pCreateInfo->extent.width,
         .height = (GLsizei)pCreateInfo->extent.height,
         .depth = (GLsizei)pCreateInfo->extent.depth,
@@ -551,6 +556,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
         compiler.set_name(variable.id, out + std::to_string(location));
     }
 
+    // TODO: fuse set and binding into one
+    // TODO: determine free locations accross all stages
+    for (auto variable : resources.sampled_images) {
+        auto binding = 
+            compiler.get_decoration(variable.id, spv::DecorationBinding);
+        shader_module.sampler_ids[binding] = variable.id;
+    }
+
     spirv_cross::CompilerGLSL::Options options{
         .version = 300, // nothing newer supported in WebGL
         .es = true,
@@ -620,6 +633,24 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
             glAttachShader(pipeline.p.program, shader);
         }
         glLinkProgram(pipeline.p.program);
+
+        glUseProgram(pipeline.p.program);
+        for (int j = 0; j < create_info.stageCount; j++) {
+            auto stage = create_info.pStages[j];
+            auto &shader_module = *(VkShaderModule_T*)stage.module;
+            for (int k = 0; k < std::size(shader_module.sampler_ids); k++) {
+                if (shader_module.sampler_ids[k] != 0) {
+                    glUniform1i(
+                        glGetUniformLocation(
+                            pipeline.p.program, (
+                                "_" + 
+                                std::to_string(shader_module.sampler_ids[k])
+                            ).c_str()
+                        ), 1
+                    );
+                }
+            }
+        }
 
         VkVertexInputBindingDescription bindings[8];
         for (
@@ -705,12 +736,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
     VkDescriptorSetLayout* pSetLayout
 ) {
     auto layout = std::make_unique<VkDescriptorSetLayout_T>();
-    layout->bindings =
-        std::make_unique<descriptor_set_layout[]>(pCreateInfo->bindingCount);
     layout->count = pCreateInfo->bindingCount;
     for (auto i = 0u; i < pCreateInfo->bindingCount; i++) {
-        layout->bindings[i].binding = pCreateInfo->pBindings[i].binding;
-        layout->bindings[i].count = pCreateInfo->pBindings[i].descriptorCount;
+        layout->bindings[pCreateInfo->pBindings[i].binding].count = 
+            pCreateInfo->pBindings[i].descriptorCount;
         // TODO: samplers
     }
     *pSetLayout = (VkDescriptorSetLayout)layout.release();
@@ -746,11 +775,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateDescriptorSets(
     VkDescriptorSet* pDescriptorSets
 ) {
     for (auto i = 0u; i < pAllocateInfo->descriptorSetCount; i++) {
-        pDescriptorSets[i] = (VkDescriptorSet)new VkDescriptorSet_T{
-            .bindings = std::make_unique<buffer_range_bindings[]>(
-                ((VkDescriptorSetLayout_T*)pAllocateInfo->pSetLayouts[i])->count
-            ),
-        };
+        pDescriptorSets[i] = (VkDescriptorSet)new VkDescriptorSet_T;
     }
     return VK_SUCCESS;
 }
@@ -777,17 +802,23 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     for (auto i = 0u; i < descriptorWriteCount; i++) {
         VkWriteDescriptorSet write = pDescriptorWrites[i];
         VkDescriptorSet_T* set = (VkDescriptorSet_T*)write.dstSet;
-        auto& binding = set->bindings[write.dstBinding];
         if (write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
             auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
-            binding.buffer_object = buffer->memory->buffer_object;
-            binding.offset = buffer->offset + write.pBufferInfo->offset;
-            binding.size = write.pBufferInfo->range;
+            set->bindings[write.dstBinding] = {
+                .buffer_object = buffer->memory->buffer_object,
+                .offset = 
+                    (GLintptr)(buffer->offset + write.pBufferInfo->offset),
+                .size = (GLsizeiptr)write.pBufferInfo->range,
+            };
 
         } else if (
             write.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
         ) {
-            // TODO
+            auto view = (VkImageView_T*)write.pImageInfo->imageView;
+            auto image = (VkImage_T*)view->image;
+            set->bindings[write.dstBinding] = {
+                .texture = image->name,
+            };
         }
     }
 }
@@ -1035,21 +1066,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
     uint32_t dynamicOffsetCount,
     const uint32_t* pDynamicOffsets
 ) {
-    auto sets = std::make_unique<buffer_range_bindings[]>(descriptorSetCount);
     // TODO: binding offsets are not alligned to UNIFORM_BUFFER_OFFSET_ALIGNMENT
     // Most GPUs require an alignment of 256 bytes.
-    for (auto i = 0u; i < descriptorSetCount; i++) {
-        sets[i] = ((VkDescriptorSet_T*)pDescriptorSets[i])->bindings[0];
-    }
-    add_command(commandBuffer, [=, sets = std::move(sets)](){
-        for (auto i = 0u; i < descriptorSetCount; i++) {
-            auto set = sets[i];
-            glBindBufferRange(
-                GL_UNIFORM_BUFFER, firstSet + i,
-                set.buffer_object, set.offset, set.size
-            );
-        }
-    });
+    // TODO: calculate global binding numbers from pairs of set and binding
+    assert(descriptorSetCount == 1);
+    assert(firstSet == 0);
+    VkDescriptorSet_T* set = (VkDescriptorSet_T*)pDescriptorSets[0];
+    commandBuffer->descriptor_set = set;
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(
@@ -1130,7 +1153,6 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     uint32_t firstInstance
 ) {
     GLenum primitive_type = commandBuffer->primitive_type;
-    // TODO: bind vertex attributes
 
     if (instanceCount == 1) {
         add_command(commandBuffer, [=](){
@@ -1189,9 +1211,22 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
     }
 
     if (instanceCount == 1) {
+        VkDescriptorSet_T set = *commandBuffer->descriptor_set;
         add_command(
             commandBuffer, [=, vertex_array = std::move(vertex_array)](){
-                glBindTexture(GL_TEXTURE_2D, 0); // workaround
+                auto &bindings = set.bindings;
+                for (auto i = 0u; i < std::size(bindings); i++) {
+                    auto binding = bindings[i];
+                    if (binding.buffer_object != 0) {
+                        glBindBufferRange(
+                            GL_UNIFORM_BUFFER, i,
+                            binding.buffer_object, binding.offset, binding.size
+                        );
+                    } else if (binding.texture != 0) {
+                        glActiveTexture(GL_TEXTURE0 + i);
+                        glBindTexture(GL_TEXTURE_2D, binding.texture);
+                    }
+                }
                 glBindVertexArray(vertex_array.value);
                 glDrawElements(
                     primitive_type, indexCount, gl_index_type, 
@@ -1234,7 +1269,17 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(
     uint32_t regionCount,
     const VkBufferImageCopy* pRegions
 ) {
-    // TODO: bind buffer to GL_PIXEL_UNPACK_BUFFER and call glTexSubImage2D
+    VkBuffer_T* buffer = (VkBuffer_T*)srcBuffer;
+    VkImage_T* image = (VkImage_T*)dstImage;
+    add_command(commandBuffer, [=](){
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffer->memory->buffer_object);
+        glBindTexture(GL_TEXTURE_2D, image->name);
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 0, 0, image->width, image->height, 
+            image->format, image->type, 
+            reinterpret_cast<void*>(buffer->offset + pRegions[0].bufferOffset)
+        );
+    });
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(

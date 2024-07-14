@@ -7,6 +7,7 @@
 struct format_info {
     GLenum internal_format;
     GLint size;
+    GLenum format;
     GLenum type;
     bool filterable;
 };
