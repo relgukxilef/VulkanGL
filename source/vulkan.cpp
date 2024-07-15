@@ -50,13 +50,15 @@ struct VkBuffer_T {
     VkBufferUsageFlags usage;
 };
 struct VkImage_T {
-    GLuint name;
+    GLuint texture = 0;
+    GLuint renderbuffer = 0;
     GLenum internal_format;
     GLenum format;
     GLenum type;
     GLsizei width, height, depth;
     GLsizei levels;
     VkImageUsageFlags usage;
+    bool multisample;
 };
 struct VkSwapchainKHR_T {
     VkImage_T image;
@@ -96,6 +98,7 @@ struct descriptor_set_binding {
     GLintptr offset;
     GLsizeiptr size;
     GLuint texture = 0;
+    bool multisample = false;
 };
 
 struct VkDescriptorSet_T {
@@ -148,6 +151,7 @@ struct pipeline_info {
         GLint element_size;
         GLuint divisor;
     } vertex[8];
+    bool alpha_to_coverage = false;
 };
 
 struct VkPipeline_T {
@@ -156,7 +160,7 @@ struct VkPipeline_T {
 
 struct VkCommandBuffer_T {
     std::unique_ptr<VkCommandBuffer_T> buffer_next;
-    GLuint current_resolve_texture = 0;
+    VkImage_T* current_resolve_image = nullptr;
 
     struct {
         // TODO: need to be able to encode part of the state being unknown
@@ -454,22 +458,48 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
         .depth = (GLsizei)pCreateInfo->extent.depth,
         .levels = (GLsizei)pCreateInfo->mipLevels,
         .usage = pCreateInfo->usage,
+        .multisample = pCreateInfo->samples != VK_SAMPLE_COUNT_1_BIT,
     };
-    glGenTextures(1, &internal->name);
     if (pCreateInfo->extent.depth == 1 && pCreateInfo->arrayLayers == 1) {
-        glBindTexture(GL_TEXTURE_2D, internal->name);
-        // TODO: Use Renderbuffers for images that are never read.
-        glTexStorage2D(
-            GL_TEXTURE_2D, pCreateInfo->mipLevels, 
-            internal->internal_format,
-            internal->width, internal->height
-        );
-        if (!format.filterable) {
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        if (pCreateInfo->usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+            glGenTextures(1, &internal->texture);
+            GLenum target = GL_TEXTURE_2D;
+            glBindTexture(target, internal->texture);
+            if (pCreateInfo->samples == VK_SAMPLE_COUNT_1_BIT) {
+                glTexStorage2D(
+                    target, pCreateInfo->mipLevels, 
+                    internal->internal_format,
+                    internal->width, internal->height
+                );
+                if (!format.filterable) {
+                    // TODO
+                    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                }
+            } else {
+                fprintf(
+                    stderr, "Multisampled textures are not supported on WebGL\n"
+                );
+            }
+
+        } else {
+            glGenRenderbuffers(1, &internal->renderbuffer);
+            glBindRenderbuffer(GL_RENDERBUFFER, internal->renderbuffer);
+            if (pCreateInfo->samples == VK_SAMPLE_COUNT_1_BIT) {
+                glRenderbufferStorage(
+                    GL_RENDERBUFFER, internal->internal_format, 
+                    internal->width, internal->height
+                );
+            } else {
+                glRenderbufferStorageMultisample(
+                    GL_RENDERBUFFER, pCreateInfo->samples,
+                    internal->internal_format,
+                    internal->width, internal->height
+                );
+            }
         }
     } else if (pCreateInfo->arrayLayers == 1) {
-        glBindTexture(GL_TEXTURE_3D, internal->name);
+        glBindTexture(GL_TEXTURE_3D, internal->texture);
         glTexStorage3D(
             GL_TEXTURE_3D, pCreateInfo->mipLevels, 
             internal->internal_format,
@@ -489,7 +519,8 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyImage(
     const VkAllocationCallbacks* pAllocator
 ) {
     auto internal = (VkImage_T*)image;
-    glDeleteTextures(1, &internal->name);
+    glDeleteTextures(1, &internal->texture);
+    glDeleteRenderbuffers(1, &internal->renderbuffer);
     delete internal;
 }
 
@@ -576,8 +607,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
     
     shader_module.glsl = compiler.compile();
 
-    printf("%s\n", shader_module.glsl.c_str());
-
     *pShaderModule = (VkShaderModule)new VkShaderModule_T(shader_module);
     return VK_SUCCESS;
 }
@@ -616,7 +645,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
                 ) == (
                     pCreateInfos->pRasterizationState->cullMode ==
                     VK_CULL_MODE_FRONT_BIT
-                )
+                ),
+                .alpha_to_coverage = 
+                    pCreateInfos->pMultisampleState->alphaToCoverageEnable == 
+                    VK_TRUE
             },
         };
 
@@ -817,7 +849,8 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
             auto view = (VkImageView_T*)write.pImageInfo->imageView;
             auto image = (VkImage_T*)view->image;
             set->bindings[write.dstBinding] = {
-                .texture = image->name,
+                .texture = image->texture,
+                .multisample = image->multisample,
             };
         }
     }
@@ -1024,6 +1057,14 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
     commandBuffer->gl_state.program_set = true;
     commandBuffer->gl_state.p = pipeline_data->p;
     commandBuffer->primitive_type = pipeline_data->p.primitive_type;
+
+    add_command(commandBuffer, [=](){
+        if (pipeline_data->p.alpha_to_coverage) {
+            glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+        } else {
+            glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+        }
+    });
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(
@@ -1224,7 +1265,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
                         );
                     } else if (binding.texture != 0) {
                         glActiveTexture(GL_TEXTURE0 + i);
-                        glBindTexture(GL_TEXTURE_2D, binding.texture);
+                        GLenum target = GL_TEXTURE_2D;
+                        glBindTexture(target, binding.texture);
                     }
                 }
                 glBindVertexArray(vertex_array.value);
@@ -1273,7 +1315,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(
     VkImage_T* image = (VkImage_T*)dstImage;
     add_command(commandBuffer, [=](){
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffer->memory->buffer_object);
-        glBindTexture(GL_TEXTURE_2D, image->name);
+        glBindTexture(GL_TEXTURE_2D, image->texture);
         glTexSubImage2D(
             GL_TEXTURE_2D, 0, 0, 0, image->width, image->height, 
             image->format, image->type, 
@@ -1319,25 +1361,39 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
         ((VkFramebuffer_T*)pRenderPassBegin->framebuffer)->attachments;
 
     for (auto i = 0; i < render_pass->color_attachment_count; i++) {
-        GLuint texture = 
-            attachments[render_pass->color_attachments[i]]->image->name;
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D,
-            texture, 0
-        );
+        VkImage_T* image = 
+            attachments[render_pass->color_attachments[i]]->image;
+        if (image->texture) {
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D,
+                image->texture, 0
+            );
+        } else if (image->renderbuffer) {
+            glFramebufferRenderbuffer(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_RENDERBUFFER,
+                image->renderbuffer
+            );
+        }
     }
     
-    GLuint texture = attachments[render_pass->depth_attachment]->image->name;
-    glFramebufferTexture2D(
-        GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
-        texture, 0
-    );
+    VkImage_T* image = attachments[render_pass->depth_attachment]->image;
+    if (image->texture) {
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER,  GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
+            image->texture, 0
+        );
+    } else if (image->renderbuffer) {
+        glFramebufferRenderbuffer(
+            GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+            image->renderbuffer
+        );
+    }
     
     check(glCheckFramebufferStatus(GL_FRAMEBUFFER));
 
     if (render_pass->resolve_attachments != ~0) {
-        commandBuffer->current_resolve_texture = 
-            attachments[render_pass->resolve_attachments]->image->name;
+        commandBuffer->current_resolve_image = 
+            attachments[render_pass->resolve_attachments]->image;
     }
 
     auto color = pRenderPassBegin->pClearValues->color;
@@ -1361,14 +1417,22 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
 VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(
     VkCommandBuffer commandBuffer
 ) {
-    if (commandBuffer->current_resolve_texture != ~0) {
+    if (commandBuffer->current_resolve_image) {
         unique_framebuffer framebuffer(new GLuint(0));
         glGenFramebuffers(1, framebuffer.get());
         glBindFramebuffer(GL_FRAMEBUFFER, *framebuffer);
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-            commandBuffer->current_resolve_texture, 0
-        );
+        VkImage_T* image = commandBuffer->current_resolve_image;
+        if (image->texture) {
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                image->texture, 0
+            );
+        } else if (image->renderbuffer) {
+            glFramebufferRenderbuffer(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
+                image->renderbuffer
+            );
+        }
 
         check(glCheckFramebufferStatus(GL_FRAMEBUFFER));
 
@@ -1478,7 +1542,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     );
     *pSwapchain = (VkSwapchainKHR)new VkSwapchainKHR_T{
         .image = {
-            .name = name,
+            .texture = name,
             .internal_format = 
                 gl_format(pCreateInfo->imageFormat).internal_format,
             .width = vgl::current_surface_extent.width,
@@ -1495,7 +1559,8 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySwapchainKHR(
     const VkAllocationCallbacks* pAllocator
 ) {
     auto internal = (VkSwapchainKHR_T*)swapchain;
-    glDeleteTextures(1, &internal->image.name);
+    glDeleteTextures(1, &internal->image.texture);
+    glDeleteRenderbuffers(1, &internal->image.renderbuffer);
     delete internal;
 }
 
@@ -1774,7 +1839,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
             );
             glFramebufferTexture2D(
                 GL_READ_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                image.name, 0
+                image.texture, 0
             );
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
             glBlitFramebuffer(
