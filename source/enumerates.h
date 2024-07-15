@@ -4,8 +4,27 @@
 
 #include <GLES3/gl3.h>
 
-GLenum gl_internal_format(VkFormat format);
+struct format_info {
+    GLenum internal_format;
+    GLint size;
+    GLenum format;
+    GLenum type;
+    bool filterable;
+};
+
+struct index_info {
+    GLint size;
+    GLenum type;
+};
+
+void check(GLenum result);
+
+format_info gl_format(VkFormat format);
 
 GLenum gl_shader_type(VkShaderStageFlagBits);
 
 GLenum gl_primitive_type(VkPrimitiveTopology topology);
+
+index_info gl_index_type(VkIndexType type);
+
+unsigned memory_type_index(VkBufferUsageFlags);

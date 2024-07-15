@@ -4,9 +4,9 @@ add_library(
     vulkangl STATIC
     vulkangl.cpp
     vulkan.cpp
-    globals.h globals.cpp
     enumerates.h enumerates.cpp
     egl.c gles2.c
+    vulkan_private.h
 )
 
 target_link_libraries(

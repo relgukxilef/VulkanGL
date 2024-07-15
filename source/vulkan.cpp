@@ -20,44 +20,54 @@
 
 #include <spirv_glsl.hpp>
 
-#include "globals.h"
+#include "vulkan_private.h"
 #include "enumerates.h"
 #include "spirv.hpp"
 
-// TODO: move structs to header file
-// TODO: move globals to namespace
+namespace vgl {
+    VkPhysicalDevice_T* global_physical_device;
+    gl_extent_2d current_surface_extent;
+    VkDevice_T* global_device;
+    VkQueue_T global_queue;
+    VkDeviceSize device_memory, host_memory;
+}
 
-struct VkPhysicalDevice_T {} global_physical_device;
-
-struct VkDevice_T {
-    GLuint copy_framebuffer;
-} * global_device;
 struct VkCommandPool_T {
     std::unique_ptr<struct VkCommandBuffer_T> buffers;
 };
-struct VkQueue_T {} global_queue;
 struct VkSemaphore_T {};
 struct VkDeviceMemory_T {
     // TODO: for some buffer usages (e.g. VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT)
     // don't need to be stored on the GPU
     std::unique_ptr<char[]> mapping;
-    GLuint vertex_buffer_object;
+    GLuint buffer_object;
+    unsigned memory_index;
 };
 struct VkBuffer_T {
     VkDeviceMemory_T* memory;
     unsigned size;
     unsigned offset;
+    VkBufferUsageFlags usage;
 };
 struct VkImage_T {
-    GLuint name;
+    GLuint texture = 0;
+    GLuint renderbuffer = 0;
     GLenum internal_format;
+    GLenum format;
+    GLenum type;
     GLsizei width, height, depth;
     GLsizei levels;
+    VkImageUsageFlags usage;
+    bool multisample;
 };
 struct VkSwapchainKHR_T {
     VkImage_T image;
 };
-struct VkDebugUtilsMessengerEXT_T {};
+struct VkDebugUtilsMessengerEXT_T {
+    void* user_data;
+    PFN_vkDebugUtilsMessengerCallbackEXT callback;
+    VkDebugUtilsMessengerEXT_T* next;
+} * debug_messengers = nullptr;
 
 struct VkFence_T {
     GLsync sync;
@@ -71,36 +81,42 @@ struct VkImageView_T {
 struct VkShaderModule_T {
     // shader
     std::string glsl;
+    unsigned sampler_ids[8]{0};
 };
 
-struct descriptor_set_layout {
-    GLuint binding;
+struct descriptor_set_layout_binding {
     unsigned count;
-    std::unique_ptr<VkSampler[]> immutable_samplers;
 };
 
 struct VkDescriptorSetLayout_T {
     unsigned count;
-    std::unique_ptr<descriptor_set_layout[]> bindings;
+    descriptor_set_layout_binding bindings[8];
 };
 
-struct buffer_range_bindings {
-    GLuint vertex_buffer_object;
+struct descriptor_set_binding {
+    GLuint buffer_object = 0;
     GLintptr offset;
     GLsizeiptr size;
+    GLuint texture = 0;
+    bool multisample = false;
 };
 
 struct VkDescriptorSet_T {
     // safe to store the bindings here as Vulkan doesn't allow changing
     // descriptor sets after they are bound in a command buffer
-    std::unique_ptr<buffer_range_bindings[]> bindings;
+    descriptor_set_binding bindings[8];
 };
 
 struct VkFramebuffer_T {
-    GLuint name;
+    const VkImageView_T* attachments[8];
 };
 
 struct VkRenderPass_T {
+    // only support single subpass for now
+    std::size_t color_attachments[8];
+    std::size_t depth_attachment = ~0;
+    std::size_t resolve_attachments = ~0;
+    unsigned color_attachment_count;
 };
 
 struct command {
@@ -124,14 +140,27 @@ struct stop_command : public command {
 };
 
 
-struct VkPipeline_T {
+struct pipeline_info {
     GLuint program;
     GLenum primitive_type;
     bool cull, cull_clockwise;
+    struct {
+        GLintptr offset;
+        GLsizei stride;
+        GLenum type;
+        GLint element_size;
+        GLuint divisor;
+    } vertex[8];
+    bool alpha_to_coverage = false;
+};
+
+struct VkPipeline_T {
+    pipeline_info p;
 };
 
 struct VkCommandBuffer_T {
     std::unique_ptr<VkCommandBuffer_T> buffer_next;
+    VkImage_T* current_resolve_image = nullptr;
 
     struct {
         // TODO: need to be able to encode part of the state being unknown
@@ -140,10 +169,22 @@ struct VkCommandBuffer_T {
             cull_set : 1, cull_clockwise_set : 1, program_set : 1;
         GLuint draw_framebuffer;
         GLuint read_framebuffer;
-        GLuint program;
-        bool cull = false, cull_clockwise = true;
+        pipeline_info p;
+        struct {
+            GLuint buffer;
+            GLintptr offset;
+            GLsizeiptr size;
+        } index;
+        struct {
+            GLuint buffer;
+            GLintptr offset;
+            GLsizeiptr size;
+            bool bound = false;
+        } vertex[8];
     } gl_state;
     GLenum primitive_type;
+    VkIndexType index_type;
+    VkDescriptorSet_T* descriptor_set;
 
     std::unique_ptr<command> first, * next = &first;
 };
@@ -169,7 +210,7 @@ vkEnumeratePhysicalDevices(
     VkPhysicalDevice* pPhysicalDevices
 ) {
     if (pPhysicalDevices && *pPhysicalDeviceCount >= 1) {
-        pPhysicalDevices[0] = &global_physical_device;
+        pPhysicalDevices[0] = vgl::global_physical_device;
     } 
     *pPhysicalDeviceCount = 1;
     return VK_SUCCESS;
@@ -205,7 +246,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceSupportKHR(
 VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties(
     VkPhysicalDevice physicalDevice,
     VkPhysicalDeviceMemoryProperties* pMemoryProperties
-) {}
+) {
+    *pMemoryProperties = 
+        ((VkPhysicalDevice_T*)physicalDevice)->memory_properties;
+}
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     VkPhysicalDevice physicalDevice,
@@ -214,7 +258,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     VkDevice* pDevice
 ) {
     *pDevice = new VkDevice_T;
-    global_device = *pDevice;
+    vgl::global_device = *pDevice;
     glGenFramebuffers(1, &(*pDevice)->copy_framebuffer);
     return VK_SUCCESS;
 }
@@ -223,7 +267,8 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(
     VkDevice device,
     const VkAllocationCallbacks* pAllocator
 ) {
-    global_device = nullptr;
+    glDeleteFramebuffers(1, &device->copy_framebuffer);
+    vgl::global_device = nullptr;
     delete device;
 }
 
@@ -234,15 +279,26 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
     VkDeviceMemory* pMemory
 ) {
     GLuint buffer;
+    GLenum buffer_type = 
+        memory_types[pAllocateInfo->memoryTypeIndex].default_binding;
+    if (buffer_type == GL_NONE) {
+        // Don't need memory for images
+        *pMemory = (VkDeviceMemory)new VkDeviceMemory_T {
+            .mapping = nullptr,
+            .buffer_object = 0,
+        };
+        return VK_SUCCESS;
+    }
+
     glGenBuffers(1, &buffer);
-    glBindBuffer(GL_UNIFORM_BUFFER, buffer);
+    glBindBuffer(buffer_type, buffer);
     glBufferData(
-        GL_UNIFORM_BUFFER, pAllocateInfo->allocationSize, nullptr,
-        GL_DYNAMIC_COPY
+        buffer_type, pAllocateInfo->allocationSize, nullptr, GL_DYNAMIC_COPY
     );
     *pMemory = (VkDeviceMemory)new VkDeviceMemory_T {
         .mapping = std::make_unique<char[]>(pAllocateInfo->allocationSize),
-        .vertex_buffer_object = buffer,
+        .buffer_object = buffer,
+        .memory_index = pAllocateInfo->memoryTypeIndex,
     };
     return VK_SUCCESS;
 }
@@ -253,7 +309,7 @@ VKAPI_ATTR void VKAPI_CALL vkFreeMemory(
     const VkAllocationCallbacks* pAllocator
 ) {
     auto internal = (VkDeviceMemory_T*)memory;
-    glDeleteBuffers(1, &internal->vertex_buffer_object);
+    glDeleteBuffers(1, &internal->buffer_object);
     delete internal;
 }
 
@@ -285,9 +341,13 @@ VKAPI_ATTR VkResult VKAPI_CALL vkFlushMappedMemoryRanges(
     for (auto i = 0u; i < memoryRangeCount; i++) {
         VkMappedMemoryRange range = pMemoryRanges[i];
         auto internal = (VkDeviceMemory_T*)range.memory;
-        glBindBuffer(GL_COPY_WRITE_BUFFER, internal->vertex_buffer_object);
+        auto binding_point = 
+            memory_types[internal->memory_index].default_binding;
+        glBindBuffer(
+            binding_point, internal->buffer_object
+        );
         glBufferSubData(
-            GL_UNIFORM_BUFFER, range.offset, range.size,
+            binding_point, range.offset, range.size,
             internal->mapping.get() + range.offset
         );
     }
@@ -314,6 +374,16 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(
     return VK_SUCCESS;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(
+    VkDevice device,
+    VkImage image,
+    VkDeviceMemory memory,
+    VkDeviceSize memoryOffset
+) {
+    // Nothing to do
+    return VK_SUCCESS;
+}
+
 VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
     VkDevice device,
     VkBuffer buffer,
@@ -322,7 +392,33 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
     auto internal = (VkBuffer_T*)buffer;
     pMemoryRequirements->alignment = 1;
     pMemoryRequirements->size = internal->size;
-    pMemoryRequirements->memoryTypeBits = ~0;
+    pMemoryRequirements->memoryTypeBits = 0;
+    uint32_t bits = 1;
+    for (auto memory_type : memory_types) {
+        if (internal->usage & memory_type.buffer_usage)
+            pMemoryRequirements->memoryTypeBits = bits;
+        bits <<= 1;
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
+    VkDevice device,
+    VkImage image,
+    VkMemoryRequirements* pMemoryRequirements
+) {
+    auto internal = (VkImage_T*)image;
+    pMemoryRequirements->alignment = 1;
+    pMemoryRequirements->size = 
+        internal->width * internal->height * internal->depth * 4;
+    // TODO: handle levels > 1
+    // TODO: check image format
+    pMemoryRequirements->memoryTypeBits = 0;
+    uint32_t bits = 1;
+    for (auto memory_type : memory_types) {
+        if (internal->usage & memory_type.image_usage)
+            pMemoryRequirements->memoryTypeBits = bits;
+        bits <<= 1;
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
@@ -333,6 +429,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
 ) {
     *pBuffer = (VkBuffer)new VkBuffer_T {
         .size = (unsigned)pCreateInfo->size,
+        .usage = pCreateInfo->usage,
     };
     return VK_SUCCESS;
 }
@@ -351,22 +448,63 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
     const VkAllocationCallbacks* pAllocator,
     VkImage* pImage
 ) {
-    auto internal = new VkImage_T;
-    glGenTextures(1, &internal->name);
+    auto format = gl_format(pCreateInfo->format);
+    auto internal = new VkImage_T{
+        .internal_format = format.internal_format,
+        .format = format.format,
+        .type = format.type,
+        .width = (GLsizei)pCreateInfo->extent.width,
+        .height = (GLsizei)pCreateInfo->extent.height,
+        .depth = (GLsizei)pCreateInfo->extent.depth,
+        .levels = (GLsizei)pCreateInfo->mipLevels,
+        .usage = pCreateInfo->usage,
+        .multisample = pCreateInfo->samples != VK_SAMPLE_COUNT_1_BIT,
+    };
     if (pCreateInfo->extent.depth == 1 && pCreateInfo->arrayLayers == 1) {
-        glBindTexture(GL_TEXTURE_2D, internal->name);
-        glTexStorage2D(
-            GL_TEXTURE_2D, pCreateInfo->mipLevels, 
-            gl_internal_format(pCreateInfo->format), 
-            pCreateInfo->extent.width, pCreateInfo->extent.height
-        );
+        if (pCreateInfo->usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+            glGenTextures(1, &internal->texture);
+            GLenum target = GL_TEXTURE_2D;
+            glBindTexture(target, internal->texture);
+            if (pCreateInfo->samples == VK_SAMPLE_COUNT_1_BIT) {
+                glTexStorage2D(
+                    target, pCreateInfo->mipLevels, 
+                    internal->internal_format,
+                    internal->width, internal->height
+                );
+                if (!format.filterable) {
+                    // TODO
+                    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                }
+            } else {
+                fprintf(
+                    stderr, "Multisampled textures are not supported on WebGL\n"
+                );
+            }
+
+        } else {
+            glGenRenderbuffers(1, &internal->renderbuffer);
+            glBindRenderbuffer(GL_RENDERBUFFER, internal->renderbuffer);
+            if (pCreateInfo->samples == VK_SAMPLE_COUNT_1_BIT) {
+                glRenderbufferStorage(
+                    GL_RENDERBUFFER, internal->internal_format, 
+                    internal->width, internal->height
+                );
+            } else {
+                glRenderbufferStorageMultisample(
+                    GL_RENDERBUFFER, pCreateInfo->samples,
+                    internal->internal_format,
+                    internal->width, internal->height
+                );
+            }
+        }
     } else if (pCreateInfo->arrayLayers == 1) {
-        glBindTexture(GL_TEXTURE_3D, internal->name);
+        glBindTexture(GL_TEXTURE_3D, internal->texture);
         glTexStorage3D(
             GL_TEXTURE_3D, pCreateInfo->mipLevels, 
-            gl_internal_format(pCreateInfo->format), 
-            pCreateInfo->extent.width, pCreateInfo->extent.height, 
-            pCreateInfo->extent.depth
+            internal->internal_format,
+            internal->width, internal->height, 
+            internal->depth
         );
     } else {
         assert(false);
@@ -381,7 +519,8 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyImage(
     const VkAllocationCallbacks* pAllocator
 ) {
     auto internal = (VkImage_T*)image;
-    glDeleteTextures(1, &internal->name);
+    glDeleteTextures(1, &internal->texture);
+    glDeleteRenderbuffers(1, &internal->renderbuffer);
     delete internal;
 }
 
@@ -448,6 +587,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
         compiler.set_name(variable.id, out + std::to_string(location));
     }
 
+    // TODO: fuse set and binding into one
+    // TODO: determine free locations accross all stages
+    for (auto variable : resources.sampled_images) {
+        auto binding = 
+            compiler.get_decoration(variable.id, spv::DecorationBinding);
+        shader_module.sampler_ids[binding] = variable.id;
+    }
+
     spirv_cross::CompilerGLSL::Options options{
         .version = 300, // nothing newer supported in WebGL
         .es = true,
@@ -456,11 +603,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
             .flip_vert_y = true,
         }
     };
-	compiler.set_common_options(options);
+    compiler.set_common_options(options);
     
     shader_module.glsl = compiler.compile();
-
-    printf("%s\n", shader_module.glsl.c_str());
 
     *pShaderModule = (VkShaderModule)new VkShaderModule_T(shader_module);
     return VK_SUCCESS;
@@ -486,19 +631,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
         auto create_info = pCreateInfos[i];
 
         VkPipeline_T pipeline {
-            .program = glCreateProgram(),
-            .primitive_type = 
-                gl_primitive_type(create_info.pInputAssemblyState->topology),
-            .cull =
-                pCreateInfos->pRasterizationState->cullMode !=
-                VK_CULL_MODE_NONE,
-            .cull_clockwise = (
-                pCreateInfos->pRasterizationState->frontFace ==
-                VK_FRONT_FACE_CLOCKWISE
-            ) == (
-                pCreateInfos->pRasterizationState->cullMode ==
-                VK_CULL_MODE_FRONT_BIT
-            )
+            .p = {
+                .program = glCreateProgram(),
+                .primitive_type = gl_primitive_type(
+                    create_info.pInputAssemblyState->topology
+                ),
+                .cull =
+                    pCreateInfos->pRasterizationState->cullMode !=
+                    VK_CULL_MODE_NONE,
+                .cull_clockwise = (
+                    pCreateInfos->pRasterizationState->frontFace ==
+                    VK_FRONT_FACE_CLOCKWISE
+                ) == (
+                    pCreateInfos->pRasterizationState->cullMode ==
+                    VK_CULL_MODE_FRONT_BIT
+                ),
+                .alpha_to_coverage = 
+                    pCreateInfos->pMultisampleState->alphaToCoverageEnable == 
+                    VK_TRUE
+            },
         };
 
         for (int j = 0; j < create_info.stageCount; j++) {
@@ -511,9 +662,56 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
             const GLint length = shader_module->glsl.size();
             glShaderSource(shader, 1, &source, &length);
             glCompileShader(shader);
-            glAttachShader(pipeline.program, shader);
+            glAttachShader(pipeline.p.program, shader);
         }
-        glLinkProgram(pipeline.program);
+        glLinkProgram(pipeline.p.program);
+
+        glUseProgram(pipeline.p.program);
+        for (int j = 0; j < create_info.stageCount; j++) {
+            auto stage = create_info.pStages[j];
+            auto &shader_module = *(VkShaderModule_T*)stage.module;
+            for (int k = 0; k < std::size(shader_module.sampler_ids); k++) {
+                if (shader_module.sampler_ids[k] != 0) {
+                    glUniform1i(
+                        glGetUniformLocation(
+                            pipeline.p.program, (
+                                "_" + 
+                                std::to_string(shader_module.sampler_ids[k])
+                            ).c_str()
+                        ), 1
+                    );
+                }
+            }
+        }
+
+        VkVertexInputBindingDescription bindings[8];
+        for (
+            int j = 0; 
+            j < create_info.pVertexInputState->vertexBindingDescriptionCount;
+            j++
+        ) {
+            auto binding = 
+                create_info.pVertexInputState->pVertexBindingDescriptions[j];
+            bindings[binding.binding] = binding;
+        }
+
+        for (
+            int j = 0; 
+            j < create_info.pVertexInputState->vertexAttributeDescriptionCount;
+            j++
+        ) {
+            auto attribute = 
+                create_info.pVertexInputState->pVertexAttributeDescriptions[j];
+            auto binding = bindings[attribute.binding];
+            auto format = gl_format(attribute.format);
+            pipeline.p.vertex[attribute.location] = {
+                .offset = static_cast<GLintptr>(attribute.offset),
+                .stride = static_cast<GLsizei>(binding.stride),
+                .type = format.type,
+                .element_size = format.size,
+                .divisor = binding.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE,
+            };
+        }
         pPipelines[i] = (VkPipeline)new VkPipeline_T(pipeline);
     }
     return VK_SUCCESS;
@@ -524,7 +722,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyPipeline(
     VkPipeline pipeline,
     const VkAllocationCallbacks* pAllocator
 ) {
-    glDeleteProgram(((VkPipeline_T*)pipeline)->program);
+    glDeleteProgram(((VkPipeline_T*)pipeline)->p.program);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineLayout(
@@ -545,6 +743,24 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyPipelineLayout(
     // TODO
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateSampler(
+    VkDevice device,
+    const VkSamplerCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkSampler* pSampler
+) {
+    // TODO
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroySampler(
+    VkDevice device,
+    VkSampler sampler,
+    const VkAllocationCallbacks* pAllocator
+) {
+    // TODO
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
     VkDevice device,
     const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
@@ -552,12 +768,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
     VkDescriptorSetLayout* pSetLayout
 ) {
     auto layout = std::make_unique<VkDescriptorSetLayout_T>();
-    layout->bindings =
-        std::make_unique<descriptor_set_layout[]>(pCreateInfo->bindingCount);
     layout->count = pCreateInfo->bindingCount;
     for (auto i = 0u; i < pCreateInfo->bindingCount; i++) {
-        layout->bindings[i].binding = pCreateInfo->pBindings[i].binding;
-        layout->bindings[i].count = pCreateInfo->pBindings[i].descriptorCount;
+        layout->bindings[pCreateInfo->pBindings[i].binding].count = 
+            pCreateInfo->pBindings[i].descriptorCount;
         // TODO: samplers
     }
     *pSetLayout = (VkDescriptorSetLayout)layout.release();
@@ -593,11 +807,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateDescriptorSets(
     VkDescriptorSet* pDescriptorSets
 ) {
     for (auto i = 0u; i < pAllocateInfo->descriptorSetCount; i++) {
-        pDescriptorSets[i] = (VkDescriptorSet)new VkDescriptorSet_T{
-            .bindings = std::make_unique<buffer_range_bindings[]>(
-                ((VkDescriptorSetLayout_T*)pAllocateInfo->pSetLayouts[i])->count
-            ),
-        };
+        pDescriptorSets[i] = (VkDescriptorSet)new VkDescriptorSet_T;
     }
     return VK_SUCCESS;
 }
@@ -624,11 +834,25 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     for (auto i = 0u; i < descriptorWriteCount; i++) {
         VkWriteDescriptorSet write = pDescriptorWrites[i];
         VkDescriptorSet_T* set = (VkDescriptorSet_T*)write.dstSet;
-        auto& binding = set->bindings[write.dstBinding];
-        auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
-        binding.vertex_buffer_object = buffer->memory->vertex_buffer_object;
-        binding.offset = buffer->offset + write.pBufferInfo->offset;
-        binding.size = write.pBufferInfo->range;
+        if (write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+            auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
+            set->bindings[write.dstBinding] = {
+                .buffer_object = buffer->memory->buffer_object,
+                .offset = 
+                    (GLintptr)(buffer->offset + write.pBufferInfo->offset),
+                .size = (GLsizeiptr)write.pBufferInfo->range,
+            };
+
+        } else if (
+            write.descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+        ) {
+            auto view = (VkImageView_T*)write.pImageInfo->imageView;
+            auto image = (VkImage_T*)view->image;
+            set->bindings[write.dstBinding] = {
+                .texture = image->texture,
+                .multisample = image->multisample,
+            };
+        }
     }
 }
 
@@ -639,43 +863,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
     VkFramebuffer* pFramebuffer
 ) {
     auto framebuffer = new VkFramebuffer_T;
-    // TODO: check whether this framebuffer is equivalent to framebuffer 0
-    glGenFramebuffers(1, &framebuffer->name);
-    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer->name);
-
-    for (auto i = 0; i < pCreateInfo->attachmentCount; i++) {
-        glBindTexture(
-            GL_TEXTURE_2D, 
-            ((VkImageView_T*)pCreateInfo->pAttachments[i])->image->name
-        );
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, 	GL_TEXTURE_2D,
-            ((VkImageView_T*)pCreateInfo->pAttachments[i])->image->name, 0
-        );
+    
+    for (auto i = 0u; i < pCreateInfo->attachmentCount; ++i) {
+        framebuffer->attachments[i] = 
+            (const VkImageView_T*)pCreateInfo->pAttachments[i];
     }
-    /*
-    auto status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    if (status == GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT) {
-        fprintf(stderr, "Framebuffer has incomplete attachment");
-    } else if (status == GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT) {
-        fprintf(stderr, "Framebuffer needs at least one attachment");
-    } else if (status == GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE) {
-        fprintf(
-            stderr,
-            "Framebuffer attachments must have same number and "
-            "location of samples"
-        );
-    } else if (status == GL_FRAMEBUFFER_UNSUPPORTED) {
-        fprintf(stderr, "Framebuffer internal format not supported");
-    } else if (status == GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS) {
-        fprintf(
-            stderr,
-            "All attached images much have the same width and height."
-        );
-    } else if (status != GL_FRAMEBUFFER_COMPLETE) {
-        fprintf(stderr, "Framebuffer is incomplete for unknown reason");
-    }
-    */
+    
     *pFramebuffer = (VkFramebuffer)framebuffer;
     return VK_SUCCESS;
 }
@@ -686,8 +879,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyFramebuffer(
     const VkAllocationCallbacks* pAllocator
 ) {
     VkFramebuffer_T* internal_framebuffer = (VkFramebuffer_T*)framebuffer;
-    if (internal_framebuffer->name != 0)
-        glDeleteFramebuffers(1, &internal_framebuffer->name);
+    delete internal_framebuffer;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
@@ -696,7 +888,20 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
     const VkAllocationCallbacks* pAllocator,
     VkRenderPass* pRenderPass
 ) {
-    *pRenderPass = (VkRenderPass)new VkRenderPass_T;
+    VkRenderPass_T* render_pass = new VkRenderPass_T;
+    render_pass->color_attachment_count = 
+        pCreateInfo->pSubpasses[0].colorAttachmentCount;
+    for (int i = 0; i < render_pass->color_attachment_count; ++i) {
+        render_pass->color_attachments[i] = 
+            pCreateInfo->pSubpasses[0].pColorAttachments[i].attachment;
+    }
+    auto depth_attachment = pCreateInfo->pSubpasses[0].pDepthStencilAttachment;
+    if (depth_attachment)
+        render_pass->depth_attachment = depth_attachment->attachment;
+    auto resolve_attachment = pCreateInfo->pSubpasses[0].pResolveAttachments;
+    if (resolve_attachment)
+        render_pass->resolve_attachments = resolve_attachment->attachment;
+    *pRenderPass = (VkRenderPass)render_pass;
     return VK_SUCCESS;
 }
 
@@ -732,7 +937,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(
     uint32_t queueIndex,
     VkQueue* pQueue
 ) {
-    *pQueue = &global_queue;
+    *pQueue = &vgl::global_queue;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(
@@ -811,26 +1016,26 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
     VkPipeline pipeline
 ) {
     auto pipeline_data = (VkPipeline_T*)pipeline;
-    GLuint program = pipeline_data->program;
+    GLuint program = pipeline_data->p.program;
 
     if (
         !commandBuffer->gl_state.cull_set ||
-        pipeline_data->cull != commandBuffer->gl_state.cull
+        pipeline_data->p.cull != commandBuffer->gl_state.p.cull
     ) {
-        if (pipeline_data->cull) {
+        if (pipeline_data->p.cull) {
             add_command(commandBuffer, [](){
                 glEnable(GL_CULL_FACE);
             });
-            bool clockwise = pipeline_data->cull_clockwise;
+            bool clockwise = pipeline_data->p.cull_clockwise;
             if (
                 !commandBuffer->gl_state.cull_clockwise_set ||
-                clockwise != commandBuffer->gl_state.cull_clockwise
+                clockwise != commandBuffer->gl_state.p.cull_clockwise
             ) {
                 add_command(commandBuffer, [clockwise](){
                     glCullFace(clockwise ? GL_BACK : GL_FRONT);
                 });
                 commandBuffer->gl_state.cull_clockwise_set = true;
-                commandBuffer->gl_state.cull_clockwise = clockwise;
+                commandBuffer->gl_state.p.cull_clockwise = clockwise;
             }
         } else {
             add_command(commandBuffer, [](){
@@ -838,20 +1043,28 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
             });
         }
         commandBuffer->gl_state.cull_set = true;
-        commandBuffer->gl_state.cull = pipeline_data->cull;
+        commandBuffer->gl_state.p.cull = pipeline_data->p.cull;
     }
 
     if (
         !commandBuffer->gl_state.program_set ||
-        program != pipeline_data->program
+        program != pipeline_data->p.program
     ) {
         add_command(commandBuffer, [=](){
             glUseProgram(program);
         });
     }
     commandBuffer->gl_state.program_set = true;
-    commandBuffer->gl_state.program = program;
-    commandBuffer->primitive_type = pipeline_data->primitive_type;
+    commandBuffer->gl_state.p = pipeline_data->p;
+    commandBuffer->primitive_type = pipeline_data->p.primitive_type;
+
+    add_command(commandBuffer, [=](){
+        if (pipeline_data->p.alpha_to_coverage) {
+            glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+        } else {
+            glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
+        }
+    });
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(
@@ -894,22 +1107,84 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
     uint32_t dynamicOffsetCount,
     const uint32_t* pDynamicOffsets
 ) {
-    auto sets = std::make_unique<buffer_range_bindings[]>(descriptorSetCount);
     // TODO: binding offsets are not alligned to UNIFORM_BUFFER_OFFSET_ALIGNMENT
     // Most GPUs require an alignment of 256 bytes.
-    for (auto i = 0u; i < descriptorSetCount; i++) {
-        sets[i] = ((VkDescriptorSet_T*)pDescriptorSets[i])->bindings[0];
-    }
-    add_command(commandBuffer, [=, sets = std::move(sets)](){
-        for (auto i = 0u; i < descriptorSetCount; i++) {
-            auto set = sets[i];
-            glBindBufferRange(
-                GL_UNIFORM_BUFFER, firstSet + i,
-                set.vertex_buffer_object, set.offset, set.size
-            );
-        }
-    });
+    // TODO: calculate global binding numbers from pairs of set and binding
+    assert(descriptorSetCount == 1);
+    assert(firstSet == 0);
+    VkDescriptorSet_T* set = (VkDescriptorSet_T*)pDescriptorSets[0];
+    commandBuffer->descriptor_set = set;
 }
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(
+    VkCommandBuffer commandBuffer,
+    VkBuffer buffer,
+    VkDeviceSize offset,
+    VkIndexType indexType
+) {
+    VkBuffer_T* internal = (VkBuffer_T*)buffer;
+    commandBuffer->index_type = indexType;
+    commandBuffer->gl_state.index.buffer = internal->memory->buffer_object;
+    commandBuffer->gl_state.index.offset = internal->offset + offset;
+    commandBuffer->gl_state.index.size = internal->size;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
+    VkCommandBuffer commandBuffer,
+    uint32_t firstBinding,
+    uint32_t bindingCount,
+    const VkBuffer* pBuffers,
+    const VkDeviceSize* pOffsets
+) {
+    for (auto i = 0u; i < bindingCount; i++) {
+        const VkBuffer_T* buffer = (VkBuffer_T*)pBuffers[i];
+        auto binding = i + firstBinding;
+        commandBuffer->gl_state.vertex[binding] = {
+            .buffer = buffer->memory->buffer_object,
+            .offset = static_cast<GLintptr>(pOffsets[i] + buffer->offset),
+            .size = static_cast<GLsizeiptr>(buffer->size),
+            .bound = true,
+        };
+    }
+}
+
+template<class Smart, class Pointer>
+struct out_ptr_t {
+    out_ptr_t(Smart& smart) : smart(smart) {}
+    ~out_ptr_t() { smart = Smart(pointer); }
+
+    operator Pointer*() { return &pointer; }
+
+    Smart &smart;
+    Pointer pointer;
+};
+
+template<class Smart>
+out_ptr_t<Smart, typename Smart::pointer> out_ptr(Smart& smart) {
+    return { smart };
+}
+
+struct unique_vertex_array_object {
+    unique_vertex_array_object() : value(0) {}
+    unique_vertex_array_object(GLuint value) : value(value) {}
+    unique_vertex_array_object(const unique_vertex_array_object&) = delete;
+    unique_vertex_array_object(unique_vertex_array_object&& o) : 
+        value(o.value) 
+    {
+        o.value = 0;
+    }
+    ~unique_vertex_array_object() {
+        glDeleteVertexArrays(1, &value);
+    }
+    unique_vertex_array_object& operator=(const unique_vertex_array_object&) = 
+        delete;
+    unique_vertex_array_object& operator=(unique_vertex_array_object&& o) {
+        std::swap(value, o.value);
+        return *this;
+    }
+    GLuint value;
+    typedef GLuint pointer;
+};
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     VkCommandBuffer commandBuffer,
@@ -935,6 +1210,77 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     }
 }
 
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
+    VkCommandBuffer commandBuffer,
+    uint32_t indexCount,
+    uint32_t instanceCount,
+    uint32_t firstIndex,
+    int32_t vertexOffset,
+    uint32_t firstInstance
+) {
+    GLenum primitive_type = commandBuffer->primitive_type;
+    auto index_type = gl_index_type(commandBuffer->index_type);
+    unique_vertex_array_object vertex_array;
+    glGenVertexArrays(1, out_ptr(vertex_array));
+    glBindVertexArray(vertex_array.value);
+    glBindBuffer(
+        GL_ELEMENT_ARRAY_BUFFER,
+        commandBuffer->gl_state.index.buffer
+    );
+    unsigned index_offset = 
+        commandBuffer->gl_state.index.offset + firstIndex * index_type.size;
+    GLenum gl_index_type = index_type.type;
+    for (auto i = 0u; i < 8; i++) {
+        if (commandBuffer->gl_state.vertex[i].bound) {
+            glBindBuffer(
+                GL_ARRAY_BUFFER, commandBuffer->gl_state.vertex[i].buffer
+            );
+            glEnableVertexAttribArray(i);
+            // TODO: handle integer (glVertexAttribIPointer)
+            glVertexAttribPointer(
+                i, 
+                commandBuffer->gl_state.p.vertex[i].element_size, 
+                commandBuffer->gl_state.p.vertex[i].type, GL_FALSE,
+                commandBuffer->gl_state.p.vertex[i].stride,
+                reinterpret_cast<void*>(
+                    commandBuffer->gl_state.p.vertex[i].offset +
+                    commandBuffer->gl_state.vertex[i].offset + 
+                    commandBuffer->gl_state.p.vertex[i].stride * vertexOffset
+                )
+            );
+        }
+    }
+
+    if (instanceCount == 1) {
+        VkDescriptorSet_T set = *commandBuffer->descriptor_set;
+        add_command(
+            commandBuffer, [=, vertex_array = std::move(vertex_array)](){
+                auto &bindings = set.bindings;
+                for (auto i = 0u; i < std::size(bindings); i++) {
+                    auto binding = bindings[i];
+                    if (binding.buffer_object != 0) {
+                        glBindBufferRange(
+                            GL_UNIFORM_BUFFER, i,
+                            binding.buffer_object, binding.offset, binding.size
+                        );
+                    } else if (binding.texture != 0) {
+                        glActiveTexture(GL_TEXTURE0 + i);
+                        GLenum target = GL_TEXTURE_2D;
+                        glBindTexture(target, binding.texture);
+                    }
+                }
+                glBindVertexArray(vertex_array.value);
+                glDrawElements(
+                    primitive_type, indexCount, gl_index_type, 
+                    (void*)index_offset
+                );
+            }
+        );
+    } else {
+        // TODO
+    }
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(
     VkCommandBuffer commandBuffer,
     VkBuffer buffer,
@@ -945,6 +1291,37 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(
     GLenum primitive_type = commandBuffer->primitive_type;
     // TODO: keep buffers with VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT in CPU memory
     // and read it here to call glDraw...
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBuffer(
+    VkCommandBuffer commandBuffer,
+    VkBuffer srcBuffer,
+    VkBuffer dstBuffer,
+    uint32_t regionCount,
+    const VkBufferCopy* pRegions
+) {
+    // TODO
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(
+    VkCommandBuffer commandBuffer,
+    VkBuffer srcBuffer,
+    VkImage dstImage,
+    VkImageLayout dstImageLayout,
+    uint32_t regionCount,
+    const VkBufferImageCopy* pRegions
+) {
+    VkBuffer_T* buffer = (VkBuffer_T*)srcBuffer;
+    VkImage_T* image = (VkImage_T*)dstImage;
+    add_command(commandBuffer, [=](){
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, buffer->memory->buffer_object);
+        glBindTexture(GL_TEXTURE_2D, image->texture);
+        glTexSubImage2D(
+            GL_TEXTURE_2D, 0, 0, 0, image->width, image->height, 
+            image->format, image->type, 
+            reinterpret_cast<void*>(buffer->offset + pRegions[0].bufferOffset)
+        );
+    });
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
@@ -962,44 +1339,118 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
 
 }
 
+struct framebuffer_deleter {
+    void operator()(GLuint* framebuffer) const {
+        glDeleteFramebuffers(1, framebuffer);
+    }
+};
+
+typedef std::unique_ptr<GLuint, framebuffer_deleter> unique_framebuffer;
+
 VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
     VkCommandBuffer commandBuffer,
     const VkRenderPassBeginInfo* pRenderPassBegin,
     VkSubpassContents contents
 ) {
-    GLuint framebuffer = 
-        ((VkFramebuffer_T*)pRenderPassBegin->framebuffer)->name;
+    unique_framebuffer framebuffer(new GLuint(0));
+    glGenFramebuffers(1, framebuffer.get());
+    glBindFramebuffer(GL_FRAMEBUFFER, *framebuffer);
+
+    VkRenderPass_T* render_pass = (VkRenderPass_T*)pRenderPassBegin->renderPass;
+    auto& attachments = 
+        ((VkFramebuffer_T*)pRenderPassBegin->framebuffer)->attachments;
+
+    for (auto i = 0; i < render_pass->color_attachment_count; i++) {
+        VkImage_T* image = 
+            attachments[render_pass->color_attachments[i]]->image;
+        if (image->texture) {
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D,
+                image->texture, 0
+            );
+        } else if (image->renderbuffer) {
+            glFramebufferRenderbuffer(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_RENDERBUFFER,
+                image->renderbuffer
+            );
+        }
+    }
+    
+    VkImage_T* image = attachments[render_pass->depth_attachment]->image;
+    if (image->texture) {
+        glFramebufferTexture2D(
+            GL_FRAMEBUFFER,  GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
+            image->texture, 0
+        );
+    } else if (image->renderbuffer) {
+        glFramebufferRenderbuffer(
+            GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
+            image->renderbuffer
+        );
+    }
+    
+    check(glCheckFramebufferStatus(GL_FRAMEBUFFER));
+
+    if (render_pass->resolve_attachments != ~0) {
+        commandBuffer->current_resolve_image = 
+            attachments[render_pass->resolve_attachments]->image;
+    }
+
     auto color = pRenderPassBegin->pClearValues->color;
 
-    if (
-        !commandBuffer->gl_state.draw_framebuffer_set ||
-        commandBuffer->gl_state.draw_framebuffer != framebuffer
-    ) {
-        add_command(commandBuffer, [framebuffer, color](){
-            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    commandBuffer->gl_state.draw_framebuffer_set = true;
+    commandBuffer->gl_state.draw_framebuffer = *framebuffer;
+    add_command(
+        commandBuffer, 
+        [framebuffer = std::move(framebuffer), color](){
+            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, *framebuffer);
             glClearColor(
                 color.float32[0], color.float32[1], 
                 color.float32[2], color.float32[3]
             );
-            glClear(GL_COLOR_BUFFER_BIT);
-        });
-        commandBuffer->gl_state.draw_framebuffer_set = true;
-        commandBuffer->gl_state.draw_framebuffer = framebuffer;
-
-    } else {
-        add_command(commandBuffer, [color](){
-            glClearColor(
-                color.float32[0], color.float32[1], 
-                color.float32[2], color.float32[3]
-            );
-            glClear(GL_COLOR_BUFFER_BIT);
-        });
-    }
+            glEnable(GL_DEPTH_TEST);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        }
+    );
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(
     VkCommandBuffer commandBuffer
 ) {
+    if (commandBuffer->current_resolve_image) {
+        unique_framebuffer framebuffer(new GLuint(0));
+        glGenFramebuffers(1, framebuffer.get());
+        glBindFramebuffer(GL_FRAMEBUFFER, *framebuffer);
+        VkImage_T* image = commandBuffer->current_resolve_image;
+        if (image->texture) {
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                image->texture, 0
+            );
+        } else if (image->renderbuffer) {
+            glFramebufferRenderbuffer(
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
+                image->renderbuffer
+            );
+        }
+
+        check(glCheckFramebufferStatus(GL_FRAMEBUFFER));
+
+        GLuint color_framebuffer = commandBuffer->gl_state.draw_framebuffer;
+
+        add_command(
+            commandBuffer, 
+            [=, framebuffer = std::move(framebuffer)](){
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, color_framebuffer);
+                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, *framebuffer);
+                glBlitFramebuffer(
+                    0, 0, 0x7fffffff, 0x7fffffff, 
+                    0, 0, 0x7fffffff, 0x7fffffff,
+                    GL_COLOR_BUFFER_BIT, GL_NEAREST
+                );
+            }
+        );  
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateFence(
@@ -1068,6 +1519,13 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySemaphore(
     delete (VkSemaphore_T*)semaphore;
 }
 
+VKAPI_ATTR void vkGetPhysicalDeviceProperties(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceProperties* pProperties
+) {
+    *pProperties = ((VkPhysicalDevice_T*)physicalDevice)->device_properties;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     VkDevice device,
     const VkSwapchainCreateInfoKHR* pCreateInfo,
@@ -1084,10 +1542,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     );
     *pSwapchain = (VkSwapchainKHR)new VkSwapchainKHR_T{
         .image = {
-            .name = name,
-            .internal_format = gl_internal_format(pCreateInfo->imageFormat),
-            .width = current_surface_extent.width,
-            .height = current_surface_extent.height,
+            .texture = name,
+            .internal_format = 
+                gl_format(pCreateInfo->imageFormat).internal_format,
+            .width = vgl::current_surface_extent.width,
+            .height = vgl::current_surface_extent.height,
             .depth = 1,
         }
     };
@@ -1100,7 +1559,8 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySwapchainKHR(
     const VkAllocationCallbacks* pAllocator
 ) {
     auto internal = (VkSwapchainKHR_T*)swapchain;
-    glDeleteTextures(1, &internal->image.name);
+    glDeleteTextures(1, &internal->image.texture);
+    glDeleteRenderbuffers(1, &internal->image.renderbuffer);
     delete internal;
 }
 
@@ -1126,8 +1586,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
         .minImageCount = 1,
         .maxImageCount = 1,
         .currentExtent = { 
-            .width = (uint32_t)current_surface_extent.width, 
-            .height = (uint32_t)current_surface_extent.height 
+            .width = (uint32_t)vgl::current_surface_extent.width,
+            .height = (uint32_t)vgl::current_surface_extent.height
         },
         .minImageExtent = {
             .width = 1,
@@ -1146,13 +1606,64 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     return VK_SUCCESS;
 }
 
+#define GL_DEBUG_SEVERITY_HIGH 0x9146
+#define GL_DEBUG_SEVERITY_LOW 0x9148
+#define GL_DEBUG_SEVERITY_MEDIUM 0x9147
+#define GL_DEBUG_SEVERITY_NOTIFICATION 0x826B
+
+void write_debug_message(
+    GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, 
+    const GLchar* message, const void*
+) {
+    VkDebugUtilsMessengerCallbackDataEXT vk_message = {
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CALLBACK_DATA_EXT,
+        .pMessage = message,
+    };
+    VkDebugUtilsMessageSeverityFlagBitsEXT vk_severity;
+    switch (severity) {
+        case GL_DEBUG_SEVERITY_NOTIFICATION:
+            vk_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT;
+            break;
+        case GL_DEBUG_SEVERITY_LOW:
+            vk_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
+            break;
+        case GL_DEBUG_SEVERITY_MEDIUM:
+            vk_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT;
+            break;
+        case GL_DEBUG_SEVERITY_HIGH:
+            vk_severity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+            break;
+    }
+    VkDebugUtilsMessengerEXT_T* messenger = debug_messengers;
+    while (messenger != nullptr) {
+        messenger->callback(
+            vk_severity, VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT, 
+            &vk_message, messenger->user_data
+        );
+        messenger = messenger->next;
+    }
+}
+
+#define GL_DEBUG_OUTPUT 0x92E0
+#define GL_DEBUG_OUTPUT_SYNCHRONOUS 0x8242
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDebugUtilsMessengerEXT(
     VkInstance instance,
-    const VkDebugUtilsMessengerCreateInfoEXT*   pCreateInfo,
+    const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
     const VkAllocationCallbacks* pAllocator,
     VkDebugUtilsMessengerEXT* pMessenger
 ) {
-    *pMessenger = (VkDebugUtilsMessengerEXT)new VkDebugUtilsMessengerEXT_T;
+    glEnable(GL_DEBUG_OUTPUT);
+    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+#ifndef EMSCRIPTEN
+    glDebugMessageCallback(write_debug_message, nullptr);
+#endif
+    debug_messengers = new VkDebugUtilsMessengerEXT_T{
+        pCreateInfo->pUserData,
+        pCreateInfo->pfnUserCallback,
+        debug_messengers
+    };
+    *pMessenger = (VkDebugUtilsMessengerEXT)debug_messengers;
     return VK_SUCCESS;
 }
 
@@ -1161,20 +1672,102 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDebugUtilsMessengerEXT(
     VkDebugUtilsMessengerEXT messenger,
     const VkAllocationCallbacks* pAllocator
 ) {
-    delete (VkDebugUtilsMessengerEXT_T*)messenger;
+    auto internal = (VkDebugUtilsMessengerEXT_T*)messenger;
+    VkDebugUtilsMessengerEXT_T** m = &debug_messengers;
+    while (*m != internal) {
+        m = &(*m)->next;
+    }
+    *m = (*m)->next;
+    delete internal;
+}
+
+VKAPI_ATTR PFN_vkVoidFunction vkGetDeviceProcAddr(
+    VkDevice device,
+    const char* pName
+) {
+    return vkGetInstanceProcAddr(nullptr, pName);
 }
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(
     VkInstance instance,
     const char* pName
 ) {
-    if (strcmp(pName, "vkCreateDebugUtilsMessengerEXT") == 0) {
-        return (PFN_vkVoidFunction)vkCreateDebugUtilsMessengerEXT;
+    std::initializer_list<std::pair<const char*, PFN_vkVoidFunction>> map = {
+        {
+            "vkCreateDebugUtilsMessengerEXT",
+            (PFN_vkVoidFunction)vkCreateDebugUtilsMessengerEXT
+        }, {
+            "vkDestroyDebugUtilsMessengerEXT",
+            (PFN_vkVoidFunction)vkDestroyDebugUtilsMessengerEXT
+        }, {
+            "vkGetPhysicalDeviceProperties",
+            (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties
+        }, {
+            "vkGetPhysicalDeviceMemoryProperties",
+            (PFN_vkVoidFunction)vkGetPhysicalDeviceMemoryProperties
+        }, {
+            "vkAllocateMemory",
+            (PFN_vkVoidFunction)vkAllocateMemory
+        }, {
+            "vkFreeMemory",
+            (PFN_vkVoidFunction)vkFreeMemory
+        }, {
+            "vkMapMemory",
+            (PFN_vkVoidFunction)vkMapMemory
+        }, {
+            "vkUnmapMemory",
+            (PFN_vkVoidFunction)vkUnmapMemory
+        }, {
+            "vkFlushMappedMemoryRanges",
+            (PFN_vkVoidFunction)vkFlushMappedMemoryRanges
+        }, {
+            "vkInvalidateMappedMemoryRanges",
+            (PFN_vkVoidFunction)vkInvalidateMappedMemoryRanges
+        }, {
+            "vkBindBufferMemory",
+            (PFN_vkVoidFunction)vkBindBufferMemory
+        }, {
+            "vkBindImageMemory",
+            (PFN_vkVoidFunction)vkBindImageMemory
+        }, {
+            "vkGetBufferMemoryRequirements",
+            (PFN_vkVoidFunction)vkGetBufferMemoryRequirements
+        }, {
+            "vkGetImageMemoryRequirements",
+            (PFN_vkVoidFunction)vkGetImageMemoryRequirements
+        }, {
+            "vkCreateBuffer",
+            (PFN_vkVoidFunction)vkCreateBuffer
+        }, {
+            "vkDestroyBuffer",
+            (PFN_vkVoidFunction)vkDestroyBuffer
+        }, {
+            "vkCreateImage",
+            (PFN_vkVoidFunction)vkCreateImage
+        }, {
+            "vkDestroyImage",
+            (PFN_vkVoidFunction)vkDestroyImage
+        }, {
+            "vkCmdCopyBuffer",
+            (PFN_vkVoidFunction)vkCmdCopyBuffer
+        }, {
+            "vkGetInstanceProcAddr",
+            (PFN_vkVoidFunction)vkGetInstanceProcAddr
+        }, {
+            "vkGetBufferMemoryRequirements2KHR",
+            (PFN_vkVoidFunction)vkGetBufferMemoryRequirements2KHR
+        }, {
+            "vkGetImageMemoryRequirements2KHR",
+            (PFN_vkVoidFunction)vkGetImageMemoryRequirements2KHR
+        },
+    };
+
+    for (auto f : map) {
+        if (strcmp(pName, f.first) == 0) {
+            return f.second;
+        }
     }
-    
-    if (strcmp(pName, "vkDestroyDebugUtilsMessengerEXT") == 0) {
-        return (PFN_vkVoidFunction)vkDestroyDebugUtilsMessengerEXT;
-    }
+
     return nullptr;
 }
 
@@ -1188,8 +1781,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
 ) {
     auto internal_swapchain = (VkSwapchainKHR_T*)swapchain;
     if (
-        internal_swapchain->image.width == current_surface_extent.width &&
-        internal_swapchain->image.height == current_surface_extent.height
+        internal_swapchain->image.width == vgl::current_surface_extent.width &&
+        internal_swapchain->image.height == vgl::current_surface_extent.height
     ) {
         *pImageIndex = 0;
         return VK_SUCCESS;
@@ -1221,6 +1814,13 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(
     return VK_SUCCESS;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(
+    VkQueue queue
+) {
+    // TODO
+    return VK_SUCCESS;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
     VkQueue queue,
     const VkPresentInfoKHR* pPresentInfo
@@ -1230,16 +1830,16 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
     if (pPresentInfo->swapchainCount > 0) {
         auto image = ((VkSwapchainKHR_T*)pPresentInfo->pSwapchains[0])->image;
         if (
-            current_surface_extent.width == image.width && 
-            current_surface_extent.height == image.height
+            vgl::current_surface_extent.width == image.width &&
+            vgl::current_surface_extent.height == image.height
         ) {
             // TODO: optimize away copy
             glBindFramebuffer(
-                GL_READ_FRAMEBUFFER, global_device->copy_framebuffer
+                GL_READ_FRAMEBUFFER, vgl::global_device->copy_framebuffer
             );
             glFramebufferTexture2D(
                 GL_READ_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                image.name, 0
+                image.texture, 0
             );
             glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
             glBlitFramebuffer(
@@ -1265,3 +1865,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(
     // TODO
     return VK_SUCCESS;
 }
+
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2KHR(
+    VkDevice device,
+    const VkImageMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    vkGetImageMemoryRequirements(
+        device, pInfo->image, &pMemoryRequirements->memoryRequirements
+    );
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2KHR(
+    VkDevice device,
+    const VkBufferMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    vkGetBufferMemoryRequirements(
+        device, pInfo->buffer, &pMemoryRequirements->memoryRequirements
+    );
+}
+
+
