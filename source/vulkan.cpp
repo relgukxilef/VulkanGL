@@ -1444,8 +1444,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, color_framebuffer);
                 glBindFramebuffer(GL_DRAW_FRAMEBUFFER, *framebuffer);
                 glBlitFramebuffer(
-                    0, 0, 0x7fffffff, 0x7fffffff, 
-                    0, 0, 0x7fffffff, 0x7fffffff,
+                    0, 0, image->width, image->height, 
+                    0, 0, image->width, image->height,
                     GL_COLOR_BUFFER_BIT, GL_NEAREST
                 );
             }
