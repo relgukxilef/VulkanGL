@@ -1,3 +1,4 @@
+#include "GLES3/gl3.h"
 #include <cstdint>
 #include <sys/types.h>
 #include <vulkan/vulkan.h>
@@ -50,6 +51,7 @@ struct VkBuffer_T {
     VkBufferUsageFlags usage;
 };
 struct VkImage_T {
+    GLenum target = 0;
     GLuint texture = 0;
     GLuint renderbuffer = 0;
     GLenum internal_format;
@@ -455,7 +457,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
         .type = format.type,
         .width = (GLsizei)pCreateInfo->extent.width,
         .height = (GLsizei)pCreateInfo->extent.height,
-        .depth = (GLsizei)pCreateInfo->extent.depth,
+        .depth = GLsizei(pCreateInfo->extent.depth * pCreateInfo->arrayLayers),
         .levels = (GLsizei)pCreateInfo->mipLevels,
         .usage = pCreateInfo->usage,
         .multisample = pCreateInfo->samples != VK_SAMPLE_COUNT_1_BIT,
@@ -463,18 +465,22 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
     if (pCreateInfo->extent.depth == 1 && pCreateInfo->arrayLayers == 1) {
         if (pCreateInfo->usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
             glGenTextures(1, &internal->texture);
-            GLenum target = GL_TEXTURE_2D;
-            glBindTexture(target, internal->texture);
+            internal->target = GL_TEXTURE_2D;
+            glBindTexture(internal->target, internal->texture);
             if (pCreateInfo->samples == VK_SAMPLE_COUNT_1_BIT) {
                 glTexStorage2D(
-                    target, pCreateInfo->mipLevels, 
+                    internal->target, pCreateInfo->mipLevels, 
                     internal->internal_format,
                     internal->width, internal->height
                 );
                 if (!format.filterable) {
                     // TODO
-                    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-                    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(
+                        internal->target, GL_TEXTURE_MIN_FILTER, GL_NEAREST
+                    );
+                    glTexParameteri(
+                        internal->target, GL_TEXTURE_MAG_FILTER, GL_NEAREST
+                    );
                 }
             } else {
                 fprintf(
@@ -499,15 +505,30 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
             }
         }
     } else if (pCreateInfo->arrayLayers == 1) {
-        glBindTexture(GL_TEXTURE_3D, internal->texture);
+        // TODO: array render buffers?
+        glGenTextures(1, &internal->texture);
+        internal->target = GL_TEXTURE_3D;
+        glBindTexture(internal->target, internal->texture);
         glTexStorage3D(
-            GL_TEXTURE_3D, pCreateInfo->mipLevels, 
+            internal->target, pCreateInfo->mipLevels, 
+            internal->internal_format,
+            internal->width, internal->height, 
+            internal->depth
+        );
+    } else if (pCreateInfo->extent.depth == 1) {
+        glGenTextures(1, &internal->texture);
+        internal->target = GL_TEXTURE_2D_ARRAY;
+        glBindTexture(internal->target, internal->texture);
+        glTexStorage3D(
+            internal->target, pCreateInfo->mipLevels, 
             internal->internal_format,
             internal->width, internal->height, 
             internal->depth
         );
     } else {
-        assert(false);
+        fprintf(
+            stderr, "Unsupported image shape.\n"
+        );
     }
     *pImage = (VkImage)internal;
     return VK_SUCCESS;
@@ -1361,31 +1382,63 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
         ((VkFramebuffer_T*)pRenderPassBegin->framebuffer)->attachments;
 
     for (auto i = 0; i < render_pass->color_attachment_count; i++) {
-        VkImage_T* image = 
-            attachments[render_pass->color_attachments[i]]->image;
+        auto attachment = attachments[render_pass->color_attachments[i]];
+        VkImage_T* image = attachment->image;
         if (image->texture) {
-            glFramebufferTexture2D(
-                GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D,
-                image->texture, 0
-            );
+            if (image->target == GL_TEXTURE_2D) {
+                glFramebufferTexture2D(
+                    GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0 + i, GL_TEXTURE_2D,
+                    image->texture, 0
+                );
+            } else if (image->target == GL_TEXTURE_2D_ARRAY) {
+                glFramebufferTextureLayer(
+                    GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, 
+                    image->texture, 0, 
+                    attachment->subresource_range.baseArrayLayer
+                );
+            } else {
+                fprintf(
+                    stderr, "Unsupported image shape.\n"
+                );
+            }
         } else if (image->renderbuffer) {
             glFramebufferRenderbuffer(
                 GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_RENDERBUFFER,
                 image->renderbuffer
             );
+        } else {
+            fprintf(
+                stderr, "Invalid attachment.\n"
+            );
         }
     }
     
-    VkImage_T* image = attachments[render_pass->depth_attachment]->image;
+    auto attachment = attachments[render_pass->depth_attachment];
+    VkImage_T* image = attachment->image;
     if (image->texture) {
-        glFramebufferTexture2D(
-            GL_FRAMEBUFFER,  GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
-            image->texture, 0
-        );
+        if (image->target == GL_TEXTURE_2D) {
+            glFramebufferTexture2D(
+                GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
+                image->texture, 0
+            );
+        } else if (image->target == GL_TEXTURE_2D_ARRAY) {
+            glFramebufferTextureLayer(
+                GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, 
+                image->texture, 0, attachment->subresource_range.baseArrayLayer
+            );
+        } else {
+            fprintf(
+                stderr, "Unsupported image shape.\n"
+            );
+        }
     } else if (image->renderbuffer) {
         glFramebufferRenderbuffer(
             GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
             image->renderbuffer
+        );
+    } else {
+        fprintf(
+            stderr, "Invalid attachment.\n"
         );
     }
     
@@ -1423,8 +1476,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(
         glBindFramebuffer(GL_FRAMEBUFFER, *framebuffer);
         VkImage_T* image = commandBuffer->current_resolve_image;
         if (image->texture) {
+            assert(image->target == GL_TEXTURE_2D);
             glFramebufferTexture2D(
-                GL_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                 image->texture, 0
             );
         } else if (image->renderbuffer) {
@@ -1534,6 +1588,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
 ) {
     GLuint name;
     glGenTextures(1, &name);
+    // TODO: swapchains can hold array textures
     glBindTexture(GL_TEXTURE_2D, name);
     glTexStorage2D(
         GL_TEXTURE_2D, 1, 
@@ -1542,6 +1597,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     );
     *pSwapchain = (VkSwapchainKHR)new VkSwapchainKHR_T{
         .image = {
+            .target = GL_TEXTURE_2D,
             .texture = name,
             .internal_format = 
                 gl_format(pCreateInfo->imageFormat).internal_format,
