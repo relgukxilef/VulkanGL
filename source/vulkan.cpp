@@ -462,8 +462,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
         .usage = pCreateInfo->usage,
         .multisample = pCreateInfo->samples != VK_SAMPLE_COUNT_1_BIT,
     };
-    if (pCreateInfo->extent.depth == 1 && pCreateInfo->arrayLayers == 1) {
-        if (pCreateInfo->usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+    if (pCreateInfo->usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+        if (pCreateInfo->extent.depth == 1 && pCreateInfo->arrayLayers == 1) {
             glGenTextures(1, &internal->texture);
             internal->target = GL_TEXTURE_2D;
             glBindTexture(internal->target, internal->texture);
@@ -488,47 +488,48 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
                 );
             }
 
+        } else if (pCreateInfo->arrayLayers == 1) {
+            glGenTextures(1, &internal->texture);
+            internal->target = GL_TEXTURE_3D;
+            glBindTexture(internal->target, internal->texture);
+            glTexStorage3D(
+                internal->target, pCreateInfo->mipLevels, 
+                internal->internal_format,
+                internal->width, internal->height, 
+                internal->depth
+            );
+
+        } else if (pCreateInfo->extent.depth == 1) {
+            glGenTextures(1, &internal->texture);
+            internal->target = GL_TEXTURE_2D_ARRAY;
+            glBindTexture(internal->target, internal->texture);
+            glTexStorage3D(
+                internal->target, pCreateInfo->mipLevels, 
+                internal->internal_format,
+                internal->width, internal->height, 
+                internal->depth
+            );
         } else {
-            glGenRenderbuffers(1, &internal->renderbuffer);
-            glBindRenderbuffer(GL_RENDERBUFFER, internal->renderbuffer);
-            if (pCreateInfo->samples == VK_SAMPLE_COUNT_1_BIT) {
-                glRenderbufferStorage(
-                    GL_RENDERBUFFER, internal->internal_format, 
-                    internal->width, internal->height
-                );
-            } else {
-                glRenderbufferStorageMultisample(
-                    GL_RENDERBUFFER, pCreateInfo->samples,
-                    internal->internal_format,
-                    internal->width, internal->height
-                );
-            }
+            fprintf(
+                stderr, "Unsupported image shape.\n"
+            );
         }
-    } else if (pCreateInfo->arrayLayers == 1) {
-        // TODO: array render buffers?
-        glGenTextures(1, &internal->texture);
-        internal->target = GL_TEXTURE_3D;
-        glBindTexture(internal->target, internal->texture);
-        glTexStorage3D(
-            internal->target, pCreateInfo->mipLevels, 
-            internal->internal_format,
-            internal->width, internal->height, 
-            internal->depth
-        );
-    } else if (pCreateInfo->extent.depth == 1) {
-        glGenTextures(1, &internal->texture);
-        internal->target = GL_TEXTURE_2D_ARRAY;
-        glBindTexture(internal->target, internal->texture);
-        glTexStorage3D(
-            internal->target, pCreateInfo->mipLevels, 
-            internal->internal_format,
-            internal->width, internal->height, 
-            internal->depth
-        );
     } else {
-        fprintf(
-            stderr, "Unsupported image shape.\n"
-        );
+        // TODO: create one render buffer per layer/depth
+        glGenRenderbuffers(1, &internal->renderbuffer);
+        glBindRenderbuffer(GL_RENDERBUFFER, internal->renderbuffer);
+        if (pCreateInfo->samples == VK_SAMPLE_COUNT_1_BIT) {
+            glRenderbufferStorage(
+                GL_RENDERBUFFER, internal->internal_format, 
+                internal->width, internal->height
+            );
+        } else {
+            glRenderbufferStorageMultisample(
+                GL_RENDERBUFFER, pCreateInfo->samples,
+                internal->internal_format,
+                internal->width, internal->height
+            );
+        }
     }
     *pImage = (VkImage)internal;
     return VK_SUCCESS;
