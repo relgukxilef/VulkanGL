@@ -53,7 +53,7 @@ struct VkBuffer_T {
 struct VkImage_T {
     GLenum target = 0;
     GLuint texture = 0;
-    GLuint renderbuffer = 0;
+    std::unique_ptr<GLuint[]> renderbuffers;
     GLenum internal_format;
     GLenum format;
     GLenum type;
@@ -163,6 +163,7 @@ struct VkPipeline_T {
 struct VkCommandBuffer_T {
     std::unique_ptr<VkCommandBuffer_T> buffer_next;
     VkImage_T* current_resolve_image = nullptr;
+    int current_resolve_layer = 0;
 
     struct {
         // TODO: need to be able to encode part of the state being unknown
@@ -515,20 +516,23 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(
             );
         }
     } else {
-        // TODO: create one render buffer per layer/depth
-        glGenRenderbuffers(1, &internal->renderbuffer);
-        glBindRenderbuffer(GL_RENDERBUFFER, internal->renderbuffer);
-        if (pCreateInfo->samples == VK_SAMPLE_COUNT_1_BIT) {
-            glRenderbufferStorage(
-                GL_RENDERBUFFER, internal->internal_format, 
-                internal->width, internal->height
-            );
-        } else {
-            glRenderbufferStorageMultisample(
-                GL_RENDERBUFFER, pCreateInfo->samples,
-                internal->internal_format,
-                internal->width, internal->height
-            );
+        // create one render buffer per layer/depth
+        internal->renderbuffers = std::make_unique<GLuint[]>(internal->depth);
+        glGenRenderbuffers(internal->depth, internal->renderbuffers.get());
+        for (auto i = 0u; i < internal->depth; i++) {
+            glBindRenderbuffer(GL_RENDERBUFFER, internal->renderbuffers[i]);
+            if (pCreateInfo->samples == VK_SAMPLE_COUNT_1_BIT) {
+                glRenderbufferStorage(
+                    GL_RENDERBUFFER, internal->internal_format, 
+                    internal->width, internal->height
+                );
+            } else {
+                glRenderbufferStorageMultisample(
+                    GL_RENDERBUFFER, pCreateInfo->samples,
+                    internal->internal_format,
+                    internal->width, internal->height
+                );
+            }
         }
     }
     *pImage = (VkImage)internal;
@@ -542,7 +546,8 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyImage(
 ) {
     auto internal = (VkImage_T*)image;
     glDeleteTextures(1, &internal->texture);
-    glDeleteRenderbuffers(1, &internal->renderbuffer);
+    if (internal->renderbuffers)
+        glDeleteRenderbuffers(internal->depth, internal->renderbuffers.get());
     delete internal;
 }
 
@@ -1384,6 +1389,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
 
     for (auto i = 0; i < render_pass->color_attachment_count; i++) {
         auto attachment = attachments[render_pass->color_attachments[i]];
+        if (attachment->subresource_range.baseMipLevel != 0)
+            fprintf(stderr, "Mip levels not supported.\n");
         VkImage_T* image = attachment->image;
         if (image->texture) {
             if (image->target == GL_TEXTURE_2D) {
@@ -1402,10 +1409,12 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
                     stderr, "Unsupported image shape.\n"
                 );
             }
-        } else if (image->renderbuffer) {
+        } else if (image->renderbuffers) {
             glFramebufferRenderbuffer(
                 GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + i, GL_RENDERBUFFER,
-                image->renderbuffer
+                image->renderbuffers[
+                    attachment->subresource_range.baseArrayLayer
+                ]
             );
         } else {
             fprintf(
@@ -1415,6 +1424,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
     }
     
     auto attachment = attachments[render_pass->depth_attachment];
+    if (attachment->subresource_range.baseMipLevel != 0)
+        fprintf(stderr, "Mip levels not supported.\n");
     VkImage_T* image = attachment->image;
     if (image->texture) {
         if (image->target == GL_TEXTURE_2D) {
@@ -1432,10 +1443,10 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
                 stderr, "Unsupported image shape.\n"
             );
         }
-    } else if (image->renderbuffer) {
+    } else if (image->renderbuffers) {
         glFramebufferRenderbuffer(
             GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
-            image->renderbuffer
+            image->renderbuffers[attachment->subresource_range.baseArrayLayer]
         );
     } else {
         fprintf(
@@ -1446,8 +1457,10 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
     check(glCheckFramebufferStatus(GL_FRAMEBUFFER));
 
     if (render_pass->resolve_attachments != ~0) {
-        commandBuffer->current_resolve_image = 
-            attachments[render_pass->resolve_attachments]->image;
+        auto attachment = attachments[render_pass->resolve_attachments];
+        commandBuffer->current_resolve_image = attachment->image;
+        commandBuffer->current_resolve_layer = 
+            attachment->subresource_range.baseArrayLayer;
     }
 
     auto color = pRenderPassBegin->pClearValues->color;
@@ -1482,10 +1495,10 @@ VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(
                 GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
                 image->texture, 0
             );
-        } else if (image->renderbuffer) {
+        } else if (image->renderbuffers) {
             glFramebufferRenderbuffer(
                 GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
-                image->renderbuffer
+                image->renderbuffers[commandBuffer->current_resolve_layer]
             );
         }
 
@@ -1616,9 +1629,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroySwapchainKHR(
     const VkAllocationCallbacks* pAllocator
 ) {
     auto internal = (VkSwapchainKHR_T*)swapchain;
-    glDeleteTextures(1, &internal->image.texture);
-    glDeleteRenderbuffers(1, &internal->image.renderbuffer);
-    delete internal;
+    vkDestroyImage(device, &internal->image, pAllocator);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetSwapchainImagesKHR(
@@ -1885,7 +1896,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
     // TODO: handle semaphores
     // TODO: handle multiple swapchains?
     if (pPresentInfo->swapchainCount > 0) {
-        auto image = ((VkSwapchainKHR_T*)pPresentInfo->pSwapchains[0])->image;
+        auto &image = ((VkSwapchainKHR_T*)pPresentInfo->pSwapchains[0])->image;
         if (
             vgl::current_surface_extent.width == image.width &&
             vgl::current_surface_extent.height == image.height
