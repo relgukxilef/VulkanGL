@@ -11,6 +11,6 @@ add_library(
 
 target_link_libraries(
     vulkangl PUBLIC
-    Vulkan-Headers
+    Vulkan::Headers
     spirv-cross-glsl
 )
