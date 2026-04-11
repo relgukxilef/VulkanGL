@@ -52,6 +52,7 @@ VkPhysicalDevice_T make_physical_device() {
             .deviceName = {},
             .pipelineCacheUUID = {},
             .limits = {
+                .maxMemoryAllocationCount = 4096,
                 .nonCoherentAtomSize = 4,
             }, // TODO
             .sparseProperties = {},
@@ -65,7 +66,7 @@ namespace vgl {
     VkSurfaceKHR_T global_surface;
     gl_extent_2d current_surface_extent;
     VkQueue_T global_queue;
-    VkDeviceSize device_memory = 1 << 25, host_memory = 1 << 25; // 32MB
+    VkDeviceSize device_memory = 1 << 27, host_memory = 1 << 27; // 128MB
 }
 
 struct VkCommandPool_T {
