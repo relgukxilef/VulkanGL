@@ -21,15 +21,51 @@
 #include <spirv_glsl.hpp>
 
 #include "vulkan_private.h"
+#include "vulkangl/vulkangl.h"
 #include "enumerates.h"
 #include "spirv.hpp"
 
+VkPhysicalDevice_T make_physical_device() {
+    VkPhysicalDeviceMemoryProperties properties{
+        .memoryTypeCount = std::size(memory_types),
+        .memoryHeapCount = 1,
+    };
+    for (auto i = 0u; i < properties.memoryTypeCount; i++)
+        properties.memoryTypes[i] = VkMemoryType{
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+            0
+        };
+    properties.memoryHeaps[0] = {
+        .size = vgl::device_memory,
+        .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+    };
+
+    return {
+        .device_properties = {
+            .apiVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
+            .driverVersion = 1,
+            .vendorID = 0,
+            .deviceID = 0,
+            .deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+            .deviceName = {},
+            .pipelineCacheUUID = {},
+            .limits = {
+                .nonCoherentAtomSize = 4,
+            }, // TODO
+            .sparseProperties = {},
+        },
+        .memory_properties = properties,
+    };
+}
+
 namespace vgl {
-    VkPhysicalDevice_T* global_physical_device;
+    VkInstance_T global_instance;
+    VkSurfaceKHR_T global_surface;
     gl_extent_2d current_surface_extent;
-    VkDevice_T* global_device;
     VkQueue_T global_queue;
-    VkDeviceSize device_memory, host_memory;
+    VkDeviceSize device_memory = 1 << 25, host_memory = 1 << 25; // 32MB
 }
 
 struct VkCommandPool_T {
@@ -197,6 +233,22 @@ void add_command(
     commandBuffer->next = &(*commandBuffer->next)->next;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
+    const VkInstanceCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkInstance* pInstance
+) {
+    vgl::global_instance.physical_device = make_physical_device();
+    *pInstance = &vgl::global_instance;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(
+    VkInstance instance,
+    const VkAllocationCallbacks* pAllocator
+) {
+}
+
 VKAPI_ATTR void VKAPI_CALL
 vkDestroySurfaceKHR(
     VkInstance instance, VkSurfaceKHR surface,
@@ -210,7 +262,7 @@ vkEnumeratePhysicalDevices(
     VkPhysicalDevice* pPhysicalDevices
 ) {
     if (pPhysicalDevices && *pPhysicalDeviceCount >= 1) {
-        pPhysicalDevices[0] = vgl::global_physical_device;
+        pPhysicalDevices[0] = &instance->physical_device;
     } 
     *pPhysicalDeviceCount = 1;
     return VK_SUCCESS;
@@ -257,9 +309,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     const VkAllocationCallbacks* pAllocator,
     VkDevice* pDevice
 ) {
-    *pDevice = new VkDevice_T;
-    vgl::global_device = *pDevice;
-    glGenFramebuffers(1, &(*pDevice)->copy_framebuffer);
+    VkDevice_T* device = new VkDevice_T;
+    device->queue.device = device;
+    glGenFramebuffers(1, &device->copy_framebuffer);
+    *pDevice = device;
     return VK_SUCCESS;
 }
 
@@ -268,8 +321,16 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(
     const VkAllocationCallbacks* pAllocator
 ) {
     glDeleteFramebuffers(1, &device->copy_framebuffer);
-    vgl::global_device = nullptr;
     delete device;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
+    const char* pLayerName,
+    uint32_t* pPropertyCount,
+    VkExtensionProperties* pProperties
+) {
+    *pPropertyCount = 0;
+    return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
@@ -384,21 +445,31 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(
     return VK_SUCCESS;
 }
 
+VkMemoryRequirements get_memory_requirements(
+    unsigned size, VkBufferUsageFlags usage
+) {
+    VkMemoryRequirements requirements {
+        .size = size,
+        .alignment = 1,
+        .memoryTypeBits = 0,
+    };
+    uint32_t bits = 1;
+    for (auto memory_type : memory_types) {
+        if (usage & memory_type.buffer_usage)
+            requirements.memoryTypeBits = bits;
+        bits <<= 1;
+    }
+    return requirements;
+}
+
 VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
     VkDevice device,
     VkBuffer buffer,
     VkMemoryRequirements* pMemoryRequirements
 ) {
     auto internal = (VkBuffer_T*)buffer;
-    pMemoryRequirements->alignment = 1;
-    pMemoryRequirements->size = internal->size;
-    pMemoryRequirements->memoryTypeBits = 0;
-    uint32_t bits = 1;
-    for (auto memory_type : memory_types) {
-        if (internal->usage & memory_type.buffer_usage)
-            pMemoryRequirements->memoryTypeBits = bits;
-        bits <<= 1;
-    }
+    *pMemoryRequirements = 
+        get_memory_requirements(internal->size, internal->usage);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
@@ -407,18 +478,12 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
     VkMemoryRequirements* pMemoryRequirements
 ) {
     auto internal = (VkImage_T*)image;
-    pMemoryRequirements->alignment = 1;
-    pMemoryRequirements->size = 
-        internal->width * internal->height * internal->depth * 4;
     // TODO: handle levels > 1
     // TODO: check image format
-    pMemoryRequirements->memoryTypeBits = 0;
-    uint32_t bits = 1;
-    for (auto memory_type : memory_types) {
-        if (internal->usage & memory_type.image_usage)
-            pMemoryRequirements->memoryTypeBits = bits;
-        bits <<= 1;
-    }
+    *pMemoryRequirements = get_memory_requirements(
+        internal->width * internal->height * internal->depth * 4, 
+        internal->usage
+    );
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
@@ -617,6 +682,22 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyShaderModule(
     const VkAllocationCallbacks* pAllocator
 ) {
     delete (VkShaderModule_T*)shaderModule;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineCache(
+    VkDevice device,
+    const VkPipelineCacheCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipelineCache* pPipelineCache
+) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyPipelineCache(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    const VkAllocationCallbacks* pAllocator
+) {
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
@@ -937,7 +1018,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(
     uint32_t queueIndex,
     VkQueue* pQueue
 ) {
-    *pQueue = &vgl::global_queue;
+    *pQueue = &device->queue;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(
@@ -1835,7 +1916,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
         ) {
             // TODO: optimize away copy
             glBindFramebuffer(
-                GL_READ_FRAMEBUFFER, vgl::global_device->copy_framebuffer
+                GL_READ_FRAMEBUFFER, queue->device->copy_framebuffer
             );
             glFramebufferTexture2D(
                 GL_READ_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
@@ -1876,6 +1957,16 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2KHR(
     );
 }
 
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(
+    VkDevice device,
+    const VkImageMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    return vkGetImageMemoryRequirements2KHR(
+        device, pInfo, pMemoryRequirements
+    );
+}
+
 VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2KHR(
     VkDevice device,
     const VkBufferMemoryRequirementsInfo2* pInfo,
@@ -1886,4 +1977,65 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2KHR(
     );
 }
 
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(
+    VkDevice device,
+    const VkBufferMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    vkGetBufferMemoryRequirements2KHR(
+        device, pInfo, pMemoryRequirements
+    );
+}
 
+VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory2(
+    VkDevice device,
+    uint32_t bindInfoCount,
+    const VkBindBufferMemoryInfo* pBindInfos
+) {
+    for (int i = 0; i < bindInfoCount; i++) {
+        auto infos = pBindInfos[i];
+        vkBindBufferMemory(
+            device, infos.buffer, infos.memory, infos.memoryOffset
+        );
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory2(
+    VkDevice device,
+    uint32_t bindInfoCount,
+    const VkBindImageMemoryInfo* pBindInfos
+) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties2(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceMemoryProperties2* pMemoryProperties
+) {
+    vkGetPhysicalDeviceMemoryProperties(
+        physicalDevice, &pMemoryProperties->memoryProperties
+    );
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceBufferMemoryRequirements(
+    VkDevice device,
+    const VkDeviceBufferMemoryRequirements* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    auto info = pInfo->pCreateInfo;
+    pMemoryRequirements->memoryRequirements =
+        get_memory_requirements(info->size, info->usage);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageMemoryRequirements(
+    VkDevice device,
+    const VkDeviceImageMemoryRequirements* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    auto info = pInfo->pCreateInfo;
+    pMemoryRequirements->memoryRequirements = get_memory_requirements(
+        info->extent.width * info->extent.height * info->extent.depth * 4, 
+        info->usage
+    );
+}

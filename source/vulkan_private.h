@@ -14,17 +14,25 @@ struct gl_extent_2d {
     GLsizei width, height;
 };
 
-struct VkDevice_T {
-    GLuint copy_framebuffer;
+struct VkQueue_T {
+    struct VkDevice_T* device;
 };
 
-struct VkQueue_T {};
+struct VkDevice_T {
+    GLuint copy_framebuffer;
+    VkQueue_T queue;
+};
+
+struct VkInstance_T {
+    VkPhysicalDevice_T physical_device;
+};
+
+struct VkSurfaceKHR_T {};
 
 namespace vgl {
-    extern VkPhysicalDevice_T* global_physical_device;
+    extern VkInstance_T global_instance;
+    extern VkSurfaceKHR_T global_surface;
     extern gl_extent_2d current_surface_extent;
-    extern VkDevice_T* global_device;
-    extern VkQueue_T global_queue;
     extern VkDeviceSize device_memory, host_memory;
 }
 
