@@ -6,6 +6,7 @@
 
 struct format_info {
     GLenum internal_format;
+    // size is the number of components, size parameter in glVertexAttribPointer
     GLint size;
     GLenum format;
     GLenum type;
