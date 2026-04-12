@@ -53,6 +53,7 @@ VkPhysicalDevice_T make_physical_device() {
             .pipelineCacheUUID = {},
             .limits = {
                 .maxMemoryAllocationCount = 4096,
+                .minUniformBufferOffsetAlignment = 64,
                 .nonCoherentAtomSize = 4,
             }, // TODO
             .sparseProperties = {},
