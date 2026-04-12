@@ -53,7 +53,8 @@ VkPhysicalDevice_T make_physical_device() {
             .pipelineCacheUUID = {},
             .limits = {
                 .maxMemoryAllocationCount = 4096,
-                .minUniformBufferOffsetAlignment = 64,
+                // TODO: read UNIFORM_BUFFER_OFFSET_ALIGNMENT
+                .minUniformBufferOffsetAlignment = 256,
                 .nonCoherentAtomSize = 4,
             }, // TODO
             .sparseProperties = {},
@@ -128,13 +129,13 @@ struct descriptor_set_layout_binding {
 
 struct VkDescriptorSetLayout_T {
     unsigned count;
-    descriptor_set_layout_binding bindings[8];
+    descriptor_set_layout_binding bindings[8] = {};
 };
 
 struct descriptor_set_binding {
     GLuint buffer_object = 0;
-    GLintptr offset;
-    GLsizeiptr size;
+    GLintptr offset = 0;
+    GLsizeiptr size = 0;
     GLuint texture = 0;
     bool multisample = false;
 };
@@ -142,16 +143,16 @@ struct descriptor_set_binding {
 struct VkDescriptorSet_T {
     // safe to store the bindings here as Vulkan doesn't allow changing
     // descriptor sets after they are bound in a command buffer
-    descriptor_set_binding bindings[8];
+    descriptor_set_binding bindings[8] = {};
 };
 
 struct VkFramebuffer_T {
-    const VkImageView_T* attachments[8];
+    const VkImageView_T* attachments[8] = {};
 };
 
 struct VkRenderPass_T {
     // only support single subpass for now
-    std::size_t color_attachments[8];
+    std::size_t color_attachments[8] = {};
     std::size_t depth_attachment = ~0;
     std::size_t resolve_attachments = ~0;
     unsigned color_attachment_count;
@@ -918,6 +919,7 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
         VkWriteDescriptorSet write = pDescriptorWrites[i];
         VkDescriptorSet_T* set = (VkDescriptorSet_T*)write.dstSet;
         if (write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+            assert(write.pBufferInfo->range > 0);
             auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
             set->bindings[write.dstBinding] = {
                 .buffer_object = buffer->memory->buffer_object,
@@ -1195,7 +1197,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
     // TODO: calculate global binding numbers from pairs of set and binding
     assert(descriptorSetCount == 1);
     assert(firstSet == 0);
-    VkDescriptorSet_T* set = (VkDescriptorSet_T*)pDescriptorSets[0];
+    VkDescriptorSet_T* set = (VkDescriptorSet_T*)(pDescriptorSets[0]);
     commandBuffer->descriptor_set = set;
 }
 
@@ -1269,50 +1271,17 @@ struct unique_vertex_array_object {
     typedef GLuint pointer;
 };
 
-VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
-    VkCommandBuffer commandBuffer,
-    uint32_t vertexCount,
-    uint32_t instanceCount,
-    uint32_t firstVertex,
-    uint32_t firstInstance
-) {
-    GLenum primitive_type = commandBuffer->primitive_type;
-
-    if (instanceCount == 1) {
-        add_command(commandBuffer, [=](){
-            glDrawArrays(primitive_type, firstVertex, vertexCount);
-        });
-    } else if (firstInstance == 0) {
-        add_command(commandBuffer, [=](){
-            glDrawArraysInstanced(
-                primitive_type, firstVertex, vertexCount, instanceCount
-            );
-        });
-    } else {
-        // TODO
-    }
-}
-
-VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
-    VkCommandBuffer commandBuffer,
-    uint32_t indexCount,
-    uint32_t instanceCount,
-    uint32_t firstIndex,
-    int32_t vertexOffset,
-    uint32_t firstInstance
-) {
-    GLenum primitive_type = commandBuffer->primitive_type;
-    auto index_type = gl_index_type(commandBuffer->index_type);
+void bind_vertex_buffers(VkCommandBuffer commandBuffer) {
+    // Preparing the VAO can only happen after vkCmdBindPipeline, 
+    // vkCmdBindVertexBuffers and vkCmdBindDescriptorSets, because only then all 
+    // parameters are known.
     unique_vertex_array_object vertex_array;
     glGenVertexArrays(1, out_ptr(vertex_array));
     glBindVertexArray(vertex_array.value);
     glBindBuffer(
         GL_ELEMENT_ARRAY_BUFFER,
-        commandBuffer->gl_state.index.buffer
+        commandBuffer->gl_state.index.buffer // may be zero
     );
-    unsigned index_offset = 
-        commandBuffer->gl_state.index.offset + firstIndex * index_type.size;
-    GLenum gl_index_type = index_type.type;
     for (auto i = 0u; i < 8; i++) {
         if (commandBuffer->gl_state.vertex[i].bound) {
             glBindBuffer(
@@ -1327,32 +1296,82 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
                 commandBuffer->gl_state.p.vertex[i].stride,
                 reinterpret_cast<void*>(
                     commandBuffer->gl_state.p.vertex[i].offset +
-                    commandBuffer->gl_state.vertex[i].offset + 
-                    commandBuffer->gl_state.p.vertex[i].stride * vertexOffset
+                    commandBuffer->gl_state.vertex[i].offset
                 )
             );
         }
     }
 
-    if (instanceCount == 1) {
-        VkDescriptorSet_T set = *commandBuffer->descriptor_set;
-        add_command(
-            commandBuffer, [=, vertex_array = std::move(vertex_array)](){
-                auto &bindings = set.bindings;
-                for (auto i = 0u; i < std::size(bindings); i++) {
-                    auto binding = bindings[i];
-                    if (binding.buffer_object != 0) {
-                        glBindBufferRange(
-                            GL_UNIFORM_BUFFER, i,
-                            binding.buffer_object, binding.offset, binding.size
-                        );
-                    } else if (binding.texture != 0) {
-                        glActiveTexture(GL_TEXTURE0 + i);
-                        GLenum target = GL_TEXTURE_2D;
-                        glBindTexture(target, binding.texture);
-                    }
+    VkDescriptorSet_T set = *commandBuffer->descriptor_set;
+    add_command(
+        commandBuffer, [=, vertex_array = std::move(vertex_array)](){
+            for (auto i = 0u; i < std::size(set.bindings); i++) {
+                auto binding = set.bindings[i];
+                if (binding.buffer_object != 0) {
+                    glBindBufferRange(
+                        GL_UNIFORM_BUFFER, i,
+                        binding.buffer_object, binding.offset, binding.size
+                    );
+                } else if (binding.texture != 0) {
+                    glActiveTexture(GL_TEXTURE0 + i);
+                    GLenum target = GL_TEXTURE_2D;
+                    glBindTexture(target, binding.texture);
                 }
-                glBindVertexArray(vertex_array.value);
+            }
+            glBindVertexArray(vertex_array.value);
+        }
+    );
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
+    VkCommandBuffer commandBuffer,
+    uint32_t vertexCount,
+    uint32_t instanceCount,
+    uint32_t firstVertex,
+    uint32_t firstInstance
+) {
+    bind_vertex_buffers(commandBuffer);
+    GLenum primitive_type = commandBuffer->primitive_type;
+
+    if (instanceCount == 1) {
+        add_command(commandBuffer, [=](){
+            glDrawArrays(primitive_type, firstVertex, vertexCount);
+        });
+    } else if (firstInstance == 0) {
+        add_command(commandBuffer, [=](){
+            glDrawArraysInstanced(
+                primitive_type, firstVertex, vertexCount, instanceCount
+            );
+        });
+    } else {
+        // TODO: re-bind buffer with instance data to account for offset
+        fprintf(stderr, "firstInstance != 0 not supported");
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
+    VkCommandBuffer commandBuffer,
+    uint32_t indexCount,
+    uint32_t instanceCount,
+    uint32_t firstIndex,
+    int32_t vertexOffset,
+    uint32_t firstInstance
+) {
+    bind_vertex_buffers(commandBuffer);
+    GLenum primitive_type = commandBuffer->primitive_type;
+    auto index_type = gl_index_type(commandBuffer->index_type);
+    GLenum gl_index_type = index_type.type;
+    unsigned index_offset = 
+        commandBuffer->gl_state.index.offset + firstIndex * index_type.size;
+
+    if (vertexOffset != 0) {
+        // TODO: re-bind buffer
+        fprintf(stderr, "vertexOffset != 0 not supported");
+    }
+    
+    if (instanceCount == 1) {
+        add_command(
+            commandBuffer, [=](){
                 glDrawElements(
                     primitive_type, indexCount, gl_index_type, 
                     (void*)index_offset
@@ -1361,6 +1380,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
         );
     } else {
         // TODO
+        fprintf(stderr, "Instanced indexed rendering not supported");
     }
 }
 
