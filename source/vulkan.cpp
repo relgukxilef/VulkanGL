@@ -191,6 +191,10 @@ struct pipeline_info {
         GLuint divisor;
     } vertex[8];
     bool alpha_to_coverage = false;
+    struct {
+        float x, y, width, height;
+    } viewport;
+    bool dynamic_viewport;
 };
 
 struct VkPipeline_T {
@@ -732,9 +736,31 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
                 ),
                 .alpha_to_coverage = 
                     pCreateInfos->pMultisampleState->alphaToCoverageEnable == 
-                    VK_TRUE
+                    VK_TRUE,
+                .dynamic_viewport = false,
             },
         };
+
+        if (create_info.pDynamicState) {
+            for (
+                int i = 0; i < create_info.pDynamicState->dynamicStateCount; i++
+            ) {
+                auto state = create_info.pDynamicState->pDynamicStates[i];
+                if (state == VK_DYNAMIC_STATE_VIEWPORT) {
+                    pipeline.p.dynamic_viewport = true;
+                }
+            }
+        }
+
+        if (!pipeline.p.dynamic_viewport) {
+            auto viewport = create_info.pViewportState->pViewports[0];
+            pipeline.p.viewport = {
+                .x = viewport.x,
+                .y = viewport.y,
+                .width = viewport.width,
+                .height = viewport.height,
+            };
+        }
 
         for (int j = 0; j < create_info.stageCount; j++) {
             auto stage = create_info.pStages[j];
@@ -1150,6 +1176,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
             glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
         }
     });
+
+    if (!pipeline_data->p.dynamic_viewport) {
+        auto viewport = pipeline_data->p.viewport;
+        add_command(commandBuffer, [=](){
+            glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+        });
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(
@@ -1271,7 +1304,9 @@ struct unique_vertex_array_object {
     typedef GLuint pointer;
 };
 
-void bind_vertex_buffers(VkCommandBuffer commandBuffer) {
+void bind_vertex_buffers(
+    VkCommandBuffer commandBuffer, int32_t vertexOffset
+) {
     // Preparing the VAO can only happen after vkCmdBindPipeline, 
     // vkCmdBindVertexBuffers and vkCmdBindDescriptorSets, because only then all 
     // parameters are known.
@@ -1296,7 +1331,8 @@ void bind_vertex_buffers(VkCommandBuffer commandBuffer) {
                 commandBuffer->gl_state.p.vertex[i].stride,
                 reinterpret_cast<void*>(
                     commandBuffer->gl_state.p.vertex[i].offset +
-                    commandBuffer->gl_state.vertex[i].offset
+                    commandBuffer->gl_state.vertex[i].offset + 
+                    commandBuffer->gl_state.p.vertex[i].stride * vertexOffset
                 )
             );
         }
@@ -1330,7 +1366,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     uint32_t firstVertex,
     uint32_t firstInstance
 ) {
-    bind_vertex_buffers(commandBuffer);
+    bind_vertex_buffers(commandBuffer, firstVertex);
     GLenum primitive_type = commandBuffer->primitive_type;
 
     if (instanceCount == 1) {
@@ -1344,7 +1380,6 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
             );
         });
     } else {
-        // TODO: re-bind buffer with instance data to account for offset
         fprintf(stderr, "firstInstance != 0 not supported");
     }
 }
@@ -1357,7 +1392,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
     int32_t vertexOffset,
     uint32_t firstInstance
 ) {
-    bind_vertex_buffers(commandBuffer);
+    bind_vertex_buffers(commandBuffer, vertexOffset);
     GLenum primitive_type = commandBuffer->primitive_type;
     auto index_type = gl_index_type(commandBuffer->index_type);
     GLenum gl_index_type = index_type.type;
@@ -1365,7 +1400,6 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
         commandBuffer->gl_state.index.offset + firstIndex * index_type.size;
 
     if (vertexOffset != 0) {
-        // TODO: re-bind buffer
         fprintf(stderr, "vertexOffset != 0 not supported");
     }
     
@@ -1889,7 +1923,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     ) {
         *pImageIndex = 0;
         return VK_SUCCESS;
-
+        
     } else {
         return VK_ERROR_OUT_OF_DATE_KHR;
     }
