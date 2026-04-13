@@ -1,6 +1,7 @@
 #include <cassert>
 
-#include "vulkan/vulkan_core.h"
+#include <vulkan/vulkan_core.h>
+#include <spirv.hpp>
 
 #include <GLES3/gl3.h>
 
@@ -23,6 +24,8 @@ void check(GLenum result);
 format_info gl_format(VkFormat format);
 
 GLenum gl_shader_type(VkShaderStageFlagBits);
+
+GLenum gl_shader_type(spv::ExecutionModel);
 
 GLenum gl_primitive_type(VkPrimitiveTopology topology);
 

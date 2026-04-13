@@ -1,16 +1,14 @@
 #include <cstdint>
 #include <sys/types.h>
-#include <vulkan/vulkan.h>
-#include <vulkan/vulkan_core.h>
-
 #include <memory>
 #include <algorithm>
-#include <chrono>
-#include <tuple>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
 #ifdef __EMSCRIPTEN__
 #include <GLES3/gl3.h>
@@ -19,11 +17,11 @@
 #endif
 
 #include <spirv_glsl.hpp>
+#include <spirv.hpp>
 
 #include "vulkan_private.h"
 #include "vulkangl/vulkangl.h"
 #include "enumerates.h"
-#include "spirv.hpp"
 
 VkPhysicalDevice_T make_physical_device() {
     VkPhysicalDeviceMemoryProperties properties{
@@ -118,8 +116,8 @@ struct VkImageView_T {
 };
 
 struct VkShaderModule_T {
-    // shader
-    std::string glsl;
+    // TODO: Shader could be used for multiple stages, need one name per stage
+    GLuint shader;
     unsigned sampler_ids[8]{0};
 };
 
@@ -628,9 +626,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
     const VkAllocationCallbacks* pAllocator,
     VkShaderModule* pShaderModule
 ) {
-    // At this point the shader stage is not known
     VkShaderModule_T shader_module;
-    
+
+    // TODO: At this point the shader stage is not known, we just guess at hope
     spirv_cross::CompilerGLSL compiler(
         pCreateInfo->pCode, pCreateInfo->codeSize / 4
     );
@@ -679,7 +677,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
     };
     compiler.set_common_options(options);
     
-    shader_module.glsl = compiler.compile();
+    auto glsl = compiler.compile();
+
+    GLuint shader = glCreateShader(gl_shader_type(stage));
+    const GLchar* source = glsl.data();
+    const GLint length = glsl.size();
+    glShaderSource(shader, 1, &source, &length);
+    glCompileShader(shader);
+
+    shader_module.shader = shader;
 
     *pShaderModule = (VkShaderModule)new VkShaderModule_T(shader_module);
     return VK_SUCCESS;
@@ -765,16 +771,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
         }
 
         for (int j = 0; j < create_info.stageCount; j++) {
-            auto stage = create_info.pStages[j];
-            GLuint shader = glCreateShader(
-                gl_shader_type(stage.stage)
-            );
-            auto shader_module = (VkShaderModule_T*)stage.module;
-            const GLchar* source = shader_module->glsl.data();
-            const GLint length = shader_module->glsl.size();
-            glShaderSource(shader, 1, &source, &length);
-            glCompileShader(shader);
-            glAttachShader(pipeline.p.program, shader);
+            auto shader_module = 
+                (VkShaderModule_T*)create_info.pStages[j].module;
+            glAttachShader(pipeline.p.program, shader_module->shader);
         }
         glLinkProgram(pipeline.p.program);
 
