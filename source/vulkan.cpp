@@ -184,12 +184,14 @@ struct pipeline_info {
     GLenum primitive_type;
     bool cull, cull_clockwise;
     struct {
+        uint32_t binding;
         GLintptr offset;
         GLsizei stride;
         GLenum type;
         GLint element_size;
         GLuint divisor;
-    } vertex[8];
+        bool bound = false;
+    } attributes[8];
     bool alpha_to_coverage = false;
     struct {
         float x, y, width, height;
@@ -814,12 +816,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
                 create_info.pVertexInputState->pVertexAttributeDescriptions[j];
             auto binding = bindings[attribute.binding];
             auto format = gl_format(attribute.format);
-            pipeline.p.vertex[attribute.location] = {
+            pipeline.p.attributes[attribute.location] = {
+                .binding = binding.binding,
                 .offset = static_cast<GLintptr>(attribute.offset),
                 .stride = static_cast<GLsizei>(binding.stride),
                 .type = format.type,
                 .element_size = format.size,
                 .divisor = binding.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE,
+                .bound = true,
             };
         }
         pPipelines[i] = (VkPipeline)new VkPipeline_T(pipeline);
@@ -1318,21 +1322,23 @@ void bind_vertex_buffers(
         commandBuffer->gl_state.index.buffer // may be zero
     );
     for (auto i = 0u; i < 8; i++) {
-        if (commandBuffer->gl_state.vertex[i].bound) {
+        auto attribute = commandBuffer->gl_state.p.attributes[i];
+        auto binding = attribute.binding;
+        if (attribute.bound) {
             glBindBuffer(
-                GL_ARRAY_BUFFER, commandBuffer->gl_state.vertex[i].buffer
+                GL_ARRAY_BUFFER, commandBuffer->gl_state.vertex[binding].buffer
             );
             glEnableVertexAttribArray(i);
             // TODO: handle integer (glVertexAttribIPointer)
             glVertexAttribPointer(
                 i, 
-                commandBuffer->gl_state.p.vertex[i].element_size, 
-                commandBuffer->gl_state.p.vertex[i].type, GL_FALSE,
-                commandBuffer->gl_state.p.vertex[i].stride,
+                attribute.element_size, 
+                attribute.type, GL_FALSE,
+                attribute.stride,
                 reinterpret_cast<void*>(
-                    commandBuffer->gl_state.p.vertex[i].offset +
-                    commandBuffer->gl_state.vertex[i].offset + 
-                    commandBuffer->gl_state.p.vertex[i].stride * vertexOffset
+                    attribute.offset +
+                    commandBuffer->gl_state.vertex[binding].offset + 
+                    attribute.stride * vertexOffset
                 )
             );
         }
