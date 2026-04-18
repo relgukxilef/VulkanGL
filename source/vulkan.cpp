@@ -50,18 +50,6 @@ struct VkBuffer_T {
     unsigned offset;
     VkBufferUsageFlags usage;
 };
-struct VkImage_T {
-    GLenum target = 0;
-    GLuint texture = 0;
-    std::unique_ptr<GLuint[]> renderbuffers;
-    GLenum internal_format;
-    GLenum format;
-    GLenum type;
-    GLsizei width, height, depth;
-    GLsizei levels;
-    VkImageUsageFlags usage;
-    bool multisample;
-};
 struct VkSwapchainKHR_T {
     VkImage_T image;
 };
@@ -1491,10 +1479,17 @@ VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(
         VkImage_T* image = commandBuffer->current_resolve_image;
         if (image->texture) {
             assert(image->target == GL_TEXTURE_2D);
-            glFramebufferTexture2D(
-                GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
-                image->texture, 0
-            );
+            if (image->depth == 1) {
+                glFramebufferTexture2D(
+                    GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                    image->texture, 0
+                );
+            } else {
+                glFramebufferTextureLayer(
+                    GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                    image->texture, 0, commandBuffer->current_resolve_layer
+                );
+            }
         } else if (image->renderbuffers) {
             glFramebufferRenderbuffer(
                 GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,

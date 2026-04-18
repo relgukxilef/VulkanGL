@@ -28,3 +28,5 @@ GLenum gl_primitive_type(VkPrimitiveTopology topology);
 index_info gl_index_type(VkIndexType type);
 
 unsigned memory_type_index(VkBufferUsageFlags);
+
+VkFormat vk_format(GLuint internal_format);

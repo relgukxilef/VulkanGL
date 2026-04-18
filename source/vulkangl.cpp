@@ -1,8 +1,7 @@
 #include "vulkangl/vulkangl.h"
 
 #include "vulkan_private.h"
-#include <algorithm>
-#include <cstring>
+#include "enumerates.h"
 
 struct VkInstance_T {} global_instance;
 struct VkSurfaceKHR_T {} global_surface;
@@ -61,4 +60,22 @@ void vglSetDeviceMemory(VkDeviceSize size) {
 
 void vglSetHostMemory(VkDeviceSize size) {
     vgl::host_memory = size;
+}
+
+VkImage vglVkImageFromGL(
+    uint32_t image, uint32_t internal_format, int32_t width, int32_t height, 
+    int32_t depth
+) {
+    return new VkImage_T{
+        .target = GL_TEXTURE_2D,
+        .texture = image,
+        .internal_format = internal_format,
+        .width = width,
+        .height = height,
+        .depth = depth,
+    };
+}
+
+VkFormat vglVkFormatFromGL(GLuint internal_format) {
+    return vk_format(internal_format);
 }

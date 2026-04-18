@@ -75,6 +75,21 @@ format_info gl_format(VkFormat format) {
     }
 }
 
+VkFormat vk_format(GLuint internal_format) {
+    switch (internal_format) {
+        case GL_RGB8: return VK_FORMAT_R8G8B8_UNORM;
+        case GL_RGBA8: return VK_FORMAT_R8G8B8A8_UNORM;
+        case GL_RGB10_A2: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        case GL_DEPTH24_STENCIL8: return VK_FORMAT_D24_UNORM_S8_UINT;
+        case GL_RGB32F: return VK_FORMAT_R32G32B32_SFLOAT;
+        case GL_RG32F: return VK_FORMAT_R32G32_SFLOAT;
+        case GL_SRGB8_ALPHA8: return VK_FORMAT_R8G8B8A8_SRGB;
+        default:
+            fprintf(stderr, "Unknown format %i\n", internal_format);
+            return VK_FORMAT_R8G8B8A8_UNORM;
+    }
+}
+
 GLenum gl_shader_type(VkShaderStageFlagBits stage) {
     switch (stage) {
     case VK_SHADER_STAGE_VERTEX_BIT:

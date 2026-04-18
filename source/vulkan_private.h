@@ -5,6 +5,8 @@
 
 #include <GLES3/gl3.h>
 
+#include <memory>
+
 struct VkPhysicalDevice_T {
     VkPhysicalDeviceProperties device_properties;
     VkPhysicalDeviceMemoryProperties memory_properties;
@@ -19,6 +21,19 @@ struct VkDevice_T {
 };
 
 struct VkQueue_T {};
+
+struct VkImage_T {
+    GLenum target = 0;
+    GLuint texture = 0;
+    std::unique_ptr<GLuint[]> renderbuffers;
+    GLenum internal_format;
+    GLenum format;
+    GLenum type;
+    GLsizei width, height, depth;
+    GLsizei levels;
+    VkImageUsageFlags usage;
+    bool multisample;
+};
 
 namespace vgl {
     extern VkPhysicalDevice_T* global_physical_device;
