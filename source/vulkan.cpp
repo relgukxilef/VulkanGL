@@ -620,6 +620,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateImageView(
     // TODO
     VkImageView_T* image_view = new VkImageView_T{
         .image = (VkImage_T*)pCreateInfo->image,
+        .subresource_range = pCreateInfo->subresourceRange,
     };
     *pView = (VkImageView)image_view;
     
