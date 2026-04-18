@@ -102,6 +102,18 @@ GLenum gl_shader_type(VkShaderStageFlagBits stage) {
     }
 }
 
+GLenum gl_shader_type(spv::ExecutionModel stage) {
+    switch (stage) {
+    case spv::ExecutionModelVertex:
+        return GL_VERTEX_SHADER;
+    case spv::ExecutionModelFragment:
+        return GL_FRAGMENT_SHADER;
+    default:
+        fprintf(stderr, "Unknown shader stage %i\n", stage);
+        return GL_VERTEX_SHADER;
+    }
+}
+
 GLenum gl_primitive_type(VkPrimitiveTopology topology) {
     switch (topology) {
     case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:

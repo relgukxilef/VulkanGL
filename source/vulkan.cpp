@@ -1,17 +1,15 @@
 #include "GLES3/gl3.h"
 #include <cstdint>
 #include <sys/types.h>
-#include <vulkan/vulkan.h>
-#include <vulkan/vulkan_core.h>
-
 #include <memory>
 #include <algorithm>
-#include <chrono>
-#include <tuple>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_core.h>
 
 #ifdef __EMSCRIPTEN__
 #include <GLES3/gl3.h>
@@ -20,17 +18,56 @@
 #endif
 
 #include <spirv_glsl.hpp>
+#include <spirv.hpp>
 
 #include "vulkan_private.h"
+#include "vulkangl/vulkangl.h"
 #include "enumerates.h"
-#include "spirv.hpp"
+
+VkPhysicalDevice_T make_physical_device() {
+    VkPhysicalDeviceMemoryProperties properties{
+        .memoryTypeCount = std::size(memory_types),
+        .memoryHeapCount = 1,
+    };
+    for (auto i = 0u; i < properties.memoryTypeCount; i++)
+        properties.memoryTypes[i] = VkMemoryType{
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+            VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+            0
+        };
+    properties.memoryHeaps[0] = {
+        .size = vgl::device_memory,
+        .flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT,
+    };
+
+    return {
+        .device_properties = {
+            .apiVersion = VK_MAKE_API_VERSION(0, 1, 0, 0),
+            .driverVersion = 1,
+            .vendorID = 0,
+            .deviceID = 0,
+            .deviceType = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+            .deviceName = {},
+            .pipelineCacheUUID = {},
+            .limits = {
+                .maxMemoryAllocationCount = 4096,
+                // TODO: read UNIFORM_BUFFER_OFFSET_ALIGNMENT
+                .minUniformBufferOffsetAlignment = 256,
+                .nonCoherentAtomSize = 4,
+            }, // TODO
+            .sparseProperties = {},
+        },
+        .memory_properties = properties,
+    };
+}
 
 namespace vgl {
-    VkPhysicalDevice_T* global_physical_device;
+    VkInstance_T global_instance;
+    VkSurfaceKHR_T global_surface;
     gl_extent_2d current_surface_extent;
-    VkDevice_T* global_device;
     VkQueue_T global_queue;
-    VkDeviceSize device_memory, host_memory;
+    VkDeviceSize device_memory = 1 << 27, host_memory = 1 << 27; // 128MB
 }
 
 struct VkCommandPool_T {
@@ -69,8 +106,8 @@ struct VkImageView_T {
 };
 
 struct VkShaderModule_T {
-    // shader
-    std::string glsl;
+    // TODO: Shader could be used for multiple stages, need one name per stage
+    GLuint shader;
     unsigned sampler_ids[8]{0};
 };
 
@@ -80,13 +117,13 @@ struct descriptor_set_layout_binding {
 
 struct VkDescriptorSetLayout_T {
     unsigned count;
-    descriptor_set_layout_binding bindings[8];
+    descriptor_set_layout_binding bindings[8] = {};
 };
 
 struct descriptor_set_binding {
     GLuint buffer_object = 0;
-    GLintptr offset;
-    GLsizeiptr size;
+    GLintptr offset = 0;
+    GLsizeiptr size = 0;
     GLuint texture = 0;
     bool multisample = false;
 };
@@ -94,16 +131,16 @@ struct descriptor_set_binding {
 struct VkDescriptorSet_T {
     // safe to store the bindings here as Vulkan doesn't allow changing
     // descriptor sets after they are bound in a command buffer
-    descriptor_set_binding bindings[8];
+    descriptor_set_binding bindings[8] = {};
 };
 
 struct VkFramebuffer_T {
-    const VkImageView_T* attachments[8];
+    const VkImageView_T* attachments[8] = {};
 };
 
 struct VkRenderPass_T {
     // only support single subpass for now
-    std::size_t color_attachments[8];
+    std::size_t color_attachments[8] = {};
     std::size_t depth_attachment = ~0;
     std::size_t resolve_attachments = ~0;
     unsigned color_attachment_count;
@@ -135,13 +172,19 @@ struct pipeline_info {
     GLenum primitive_type;
     bool cull, cull_clockwise;
     struct {
+        uint32_t binding;
         GLintptr offset;
         GLsizei stride;
         GLenum type;
         GLint element_size;
         GLuint divisor;
-    } vertex[8];
+        bool bound = false;
+    } attributes[8];
     bool alpha_to_coverage = false;
+    struct {
+        float x, y, width, height;
+    } viewport;
+    bool dynamic_viewport;
 };
 
 struct VkPipeline_T {
@@ -188,6 +231,22 @@ void add_command(
     commandBuffer->next = &(*commandBuffer->next)->next;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
+    const VkInstanceCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkInstance* pInstance
+) {
+    vgl::global_instance.physical_device = make_physical_device();
+    *pInstance = &vgl::global_instance;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(
+    VkInstance instance,
+    const VkAllocationCallbacks* pAllocator
+) {
+}
+
 VKAPI_ATTR void VKAPI_CALL
 vkDestroySurfaceKHR(
     VkInstance instance, VkSurfaceKHR surface,
@@ -201,7 +260,7 @@ vkEnumeratePhysicalDevices(
     VkPhysicalDevice* pPhysicalDevices
 ) {
     if (pPhysicalDevices && *pPhysicalDeviceCount >= 1) {
-        pPhysicalDevices[0] = vgl::global_physical_device;
+        pPhysicalDevices[0] = &instance->physical_device;
     } 
     *pPhysicalDeviceCount = 1;
     return VK_SUCCESS;
@@ -248,9 +307,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     const VkAllocationCallbacks* pAllocator,
     VkDevice* pDevice
 ) {
-    *pDevice = new VkDevice_T;
-    vgl::global_device = *pDevice;
-    glGenFramebuffers(1, &(*pDevice)->copy_framebuffer);
+    VkDevice_T* device = new VkDevice_T;
+    device->queue.device = device;
+    glGenFramebuffers(1, &device->copy_framebuffer);
+    *pDevice = device;
     return VK_SUCCESS;
 }
 
@@ -259,8 +319,16 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(
     const VkAllocationCallbacks* pAllocator
 ) {
     glDeleteFramebuffers(1, &device->copy_framebuffer);
-    vgl::global_device = nullptr;
     delete device;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateInstanceExtensionProperties(
+    const char* pLayerName,
+    uint32_t* pPropertyCount,
+    VkExtensionProperties* pProperties
+) {
+    *pPropertyCount = 0;
+    return VK_SUCCESS;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
@@ -375,21 +443,31 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(
     return VK_SUCCESS;
 }
 
+VkMemoryRequirements get_memory_requirements(
+    unsigned size, VkBufferUsageFlags usage
+) {
+    VkMemoryRequirements requirements {
+        .size = size,
+        .alignment = 1,
+        .memoryTypeBits = 0,
+    };
+    uint32_t bits = 1;
+    for (auto memory_type : memory_types) {
+        if (usage & memory_type.buffer_usage)
+            requirements.memoryTypeBits = bits;
+        bits <<= 1;
+    }
+    return requirements;
+}
+
 VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
     VkDevice device,
     VkBuffer buffer,
     VkMemoryRequirements* pMemoryRequirements
 ) {
     auto internal = (VkBuffer_T*)buffer;
-    pMemoryRequirements->alignment = 1;
-    pMemoryRequirements->size = internal->size;
-    pMemoryRequirements->memoryTypeBits = 0;
-    uint32_t bits = 1;
-    for (auto memory_type : memory_types) {
-        if (internal->usage & memory_type.buffer_usage)
-            pMemoryRequirements->memoryTypeBits = bits;
-        bits <<= 1;
-    }
+    *pMemoryRequirements = 
+        get_memory_requirements(internal->size, internal->usage);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
@@ -398,18 +476,12 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
     VkMemoryRequirements* pMemoryRequirements
 ) {
     auto internal = (VkImage_T*)image;
-    pMemoryRequirements->alignment = 1;
-    pMemoryRequirements->size = 
-        internal->width * internal->height * internal->depth * 4;
     // TODO: handle levels > 1
     // TODO: check image format
-    pMemoryRequirements->memoryTypeBits = 0;
-    uint32_t bits = 1;
-    for (auto memory_type : memory_types) {
-        if (internal->usage & memory_type.image_usage)
-            pMemoryRequirements->memoryTypeBits = bits;
-        bits <<= 1;
-    }
+    *pMemoryRequirements = get_memory_requirements(
+        internal->width * internal->height * internal->depth * 4, 
+        internal->usage
+    );
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(
@@ -569,9 +641,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
     const VkAllocationCallbacks* pAllocator,
     VkShaderModule* pShaderModule
 ) {
-    // At this point the shader stage is not known
     VkShaderModule_T shader_module;
-    
+
+    // TODO: At this point the shader stage is not known, we just guess at hope
     spirv_cross::CompilerGLSL compiler(
         pCreateInfo->pCode, pCreateInfo->codeSize / 4
     );
@@ -620,7 +692,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
     };
     compiler.set_common_options(options);
     
-    shader_module.glsl = compiler.compile();
+    auto glsl = compiler.compile();
+
+    GLuint shader = glCreateShader(gl_shader_type(stage));
+    const GLchar* source = glsl.data();
+    const GLint length = glsl.size();
+    glShaderSource(shader, 1, &source, &length);
+    glCompileShader(shader);
+
+    shader_module.shader = shader;
 
     *pShaderModule = (VkShaderModule)new VkShaderModule_T(shader_module);
     return VK_SUCCESS;
@@ -632,6 +712,22 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyShaderModule(
     const VkAllocationCallbacks* pAllocator
 ) {
     delete (VkShaderModule_T*)shaderModule;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineCache(
+    VkDevice device,
+    const VkPipelineCacheCreateInfo* pCreateInfo,
+    const VkAllocationCallbacks* pAllocator,
+    VkPipelineCache* pPipelineCache
+) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyPipelineCache(
+    VkDevice device,
+    VkPipelineCache pipelineCache,
+    const VkAllocationCallbacks* pAllocator
+) {
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
@@ -663,21 +759,36 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
                 ),
                 .alpha_to_coverage = 
                     pCreateInfos->pMultisampleState->alphaToCoverageEnable == 
-                    VK_TRUE
+                    VK_TRUE,
+                .dynamic_viewport = false,
             },
         };
 
+        if (create_info.pDynamicState) {
+            for (
+                int i = 0; i < create_info.pDynamicState->dynamicStateCount; i++
+            ) {
+                auto state = create_info.pDynamicState->pDynamicStates[i];
+                if (state == VK_DYNAMIC_STATE_VIEWPORT) {
+                    pipeline.p.dynamic_viewport = true;
+                }
+            }
+        }
+
+        if (!pipeline.p.dynamic_viewport) {
+            auto viewport = create_info.pViewportState->pViewports[0];
+            pipeline.p.viewport = {
+                .x = viewport.x,
+                .y = viewport.y,
+                .width = viewport.width,
+                .height = viewport.height,
+            };
+        }
+
         for (int j = 0; j < create_info.stageCount; j++) {
-            auto stage = create_info.pStages[j];
-            GLuint shader = glCreateShader(
-                gl_shader_type(stage.stage)
-            );
-            auto shader_module = (VkShaderModule_T*)stage.module;
-            const GLchar* source = shader_module->glsl.data();
-            const GLint length = shader_module->glsl.size();
-            glShaderSource(shader, 1, &source, &length);
-            glCompileShader(shader);
-            glAttachShader(pipeline.p.program, shader);
+            auto shader_module = 
+                (VkShaderModule_T*)create_info.pStages[j].module;
+            glAttachShader(pipeline.p.program, shader_module->shader);
         }
         glLinkProgram(pipeline.p.program);
 
@@ -719,12 +830,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
                 create_info.pVertexInputState->pVertexAttributeDescriptions[j];
             auto binding = bindings[attribute.binding];
             auto format = gl_format(attribute.format);
-            pipeline.p.vertex[attribute.location] = {
+            pipeline.p.attributes[attribute.location] = {
+                .binding = binding.binding,
                 .offset = static_cast<GLintptr>(attribute.offset),
                 .stride = static_cast<GLsizei>(binding.stride),
                 .type = format.type,
                 .element_size = format.size,
                 .divisor = binding.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE,
+                .bound = true,
             };
         }
         pPipelines[i] = (VkPipeline)new VkPipeline_T(pipeline);
@@ -850,6 +963,7 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
         VkWriteDescriptorSet write = pDescriptorWrites[i];
         VkDescriptorSet_T* set = (VkDescriptorSet_T*)write.dstSet;
         if (write.descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+            assert(write.pBufferInfo->range > 0);
             auto buffer = (VkBuffer_T*)write.pBufferInfo->buffer;
             set->bindings[write.dstBinding] = {
                 .buffer_object = buffer->memory->buffer_object,
@@ -952,7 +1066,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(
     uint32_t queueIndex,
     VkQueue* pQueue
 ) {
-    *pQueue = &vgl::global_queue;
+    *pQueue = &device->queue;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceFormatsKHR(
@@ -1080,6 +1194,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
             glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
         }
     });
+
+    if (!pipeline_data->p.dynamic_viewport) {
+        auto viewport = pipeline_data->p.viewport;
+        add_command(commandBuffer, [=](){
+            glViewport(viewport.x, viewport.y, viewport.width, viewport.height);
+        });
+    }
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(
@@ -1127,7 +1248,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
     // TODO: calculate global binding numbers from pairs of set and binding
     assert(descriptorSetCount == 1);
     assert(firstSet == 0);
-    VkDescriptorSet_T* set = (VkDescriptorSet_T*)pDescriptorSets[0];
+    VkDescriptorSet_T* set = (VkDescriptorSet_T*)(pDescriptorSets[0]);
     commandBuffer->descriptor_set = set;
 }
 
@@ -1201,6 +1322,63 @@ struct unique_vertex_array_object {
     typedef GLuint pointer;
 };
 
+void bind_vertex_buffers(
+    VkCommandBuffer commandBuffer, int32_t vertexOffset
+) {
+    // Preparing the VAO can only happen after vkCmdBindPipeline, 
+    // vkCmdBindVertexBuffers and vkCmdBindDescriptorSets, because only then all 
+    // parameters are known.
+    unique_vertex_array_object vertex_array;
+    glGenVertexArrays(1, out_ptr(vertex_array));
+    glBindVertexArray(vertex_array.value);
+    glBindBuffer(
+        GL_ELEMENT_ARRAY_BUFFER,
+        commandBuffer->gl_state.index.buffer // may be zero
+    );
+    for (auto i = 0u; i < 8; i++) {
+        auto attribute = commandBuffer->gl_state.p.attributes[i];
+        auto binding = attribute.binding;
+        if (attribute.bound) {
+            glBindBuffer(
+                GL_ARRAY_BUFFER, commandBuffer->gl_state.vertex[binding].buffer
+            );
+            glEnableVertexAttribArray(i);
+            // TODO: handle integer (glVertexAttribIPointer)
+            glVertexAttribPointer(
+                i, 
+                attribute.element_size, 
+                attribute.type, GL_FALSE,
+                attribute.stride,
+                reinterpret_cast<void*>(
+                    attribute.offset +
+                    commandBuffer->gl_state.vertex[binding].offset + 
+                    attribute.stride * vertexOffset
+                )
+            );
+        }
+    }
+
+    VkDescriptorSet_T set = *commandBuffer->descriptor_set;
+    add_command(
+        commandBuffer, [=, vertex_array = std::move(vertex_array)](){
+            for (auto i = 0u; i < std::size(set.bindings); i++) {
+                auto binding = set.bindings[i];
+                if (binding.buffer_object != 0) {
+                    glBindBufferRange(
+                        GL_UNIFORM_BUFFER, i,
+                        binding.buffer_object, binding.offset, binding.size
+                    );
+                } else if (binding.texture != 0) {
+                    glActiveTexture(GL_TEXTURE0 + i);
+                    GLenum target = GL_TEXTURE_2D;
+                    glBindTexture(target, binding.texture);
+                }
+            }
+            glBindVertexArray(vertex_array.value);
+        }
+    );
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     VkCommandBuffer commandBuffer,
     uint32_t vertexCount,
@@ -1208,6 +1386,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
     uint32_t firstVertex,
     uint32_t firstInstance
 ) {
+    bind_vertex_buffers(commandBuffer, firstVertex);
     GLenum primitive_type = commandBuffer->primitive_type;
 
     if (instanceCount == 1) {
@@ -1221,7 +1400,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(
             );
         });
     } else {
-        // TODO
+        fprintf(stderr, "firstInstance != 0 not supported");
     }
 }
 
@@ -1233,58 +1412,20 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
     int32_t vertexOffset,
     uint32_t firstInstance
 ) {
+    bind_vertex_buffers(commandBuffer, vertexOffset);
     GLenum primitive_type = commandBuffer->primitive_type;
     auto index_type = gl_index_type(commandBuffer->index_type);
-    unique_vertex_array_object vertex_array;
-    glGenVertexArrays(1, out_ptr(vertex_array));
-    glBindVertexArray(vertex_array.value);
-    glBindBuffer(
-        GL_ELEMENT_ARRAY_BUFFER,
-        commandBuffer->gl_state.index.buffer
-    );
+    GLenum gl_index_type = index_type.type;
     unsigned index_offset = 
         commandBuffer->gl_state.index.offset + firstIndex * index_type.size;
-    GLenum gl_index_type = index_type.type;
-    for (auto i = 0u; i < 8; i++) {
-        if (commandBuffer->gl_state.vertex[i].bound) {
-            glBindBuffer(
-                GL_ARRAY_BUFFER, commandBuffer->gl_state.vertex[i].buffer
-            );
-            glEnableVertexAttribArray(i);
-            // TODO: handle integer (glVertexAttribIPointer)
-            glVertexAttribPointer(
-                i, 
-                commandBuffer->gl_state.p.vertex[i].element_size, 
-                commandBuffer->gl_state.p.vertex[i].type, GL_FALSE,
-                commandBuffer->gl_state.p.vertex[i].stride,
-                reinterpret_cast<void*>(
-                    commandBuffer->gl_state.p.vertex[i].offset +
-                    commandBuffer->gl_state.vertex[i].offset + 
-                    commandBuffer->gl_state.p.vertex[i].stride * vertexOffset
-                )
-            );
-        }
-    }
 
+    if (vertexOffset != 0) {
+        fprintf(stderr, "vertexOffset != 0 not supported");
+    }
+    
     if (instanceCount == 1) {
-        VkDescriptorSet_T set = *commandBuffer->descriptor_set;
         add_command(
-            commandBuffer, [=, vertex_array = std::move(vertex_array)](){
-                auto &bindings = set.bindings;
-                for (auto i = 0u; i < std::size(bindings); i++) {
-                    auto binding = bindings[i];
-                    if (binding.buffer_object != 0) {
-                        glBindBufferRange(
-                            GL_UNIFORM_BUFFER, i,
-                            binding.buffer_object, binding.offset, binding.size
-                        );
-                    } else if (binding.texture != 0) {
-                        glActiveTexture(GL_TEXTURE0 + i);
-                        GLenum target = GL_TEXTURE_2D;
-                        glBindTexture(target, binding.texture);
-                    }
-                }
-                glBindVertexArray(vertex_array.value);
+            commandBuffer, [=](){
                 glDrawElements(
                     primitive_type, indexCount, gl_index_type, 
                     (void*)index_offset
@@ -1293,6 +1434,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
         );
     } else {
         // TODO
+        fprintf(stderr, "Instanced indexed rendering not supported");
     }
 }
 
@@ -1849,7 +1991,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(
     ) {
         *pImageIndex = 0;
         return VK_SUCCESS;
-
+        
     } else {
         return VK_ERROR_OUT_OF_DATE_KHR;
     }
@@ -1898,7 +2040,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
         ) {
             // TODO: optimize away copy
             glBindFramebuffer(
-                GL_READ_FRAMEBUFFER, vgl::global_device->copy_framebuffer
+                GL_READ_FRAMEBUFFER, queue->device->copy_framebuffer
             );
             glFramebufferTexture2D(
                 GL_READ_FRAMEBUFFER,  GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
@@ -1939,6 +2081,16 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2KHR(
     );
 }
 
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(
+    VkDevice device,
+    const VkImageMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    return vkGetImageMemoryRequirements2KHR(
+        device, pInfo, pMemoryRequirements
+    );
+}
+
 VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2KHR(
     VkDevice device,
     const VkBufferMemoryRequirementsInfo2* pInfo,
@@ -1949,4 +2101,65 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2KHR(
     );
 }
 
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(
+    VkDevice device,
+    const VkBufferMemoryRequirementsInfo2* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    vkGetBufferMemoryRequirements2KHR(
+        device, pInfo, pMemoryRequirements
+    );
+}
 
+VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory2(
+    VkDevice device,
+    uint32_t bindInfoCount,
+    const VkBindBufferMemoryInfo* pBindInfos
+) {
+    for (int i = 0; i < bindInfoCount; i++) {
+        auto infos = pBindInfos[i];
+        vkBindBufferMemory(
+            device, infos.buffer, infos.memory, infos.memoryOffset
+        );
+    }
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory2(
+    VkDevice device,
+    uint32_t bindInfoCount,
+    const VkBindImageMemoryInfo* pBindInfos
+) {
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetPhysicalDeviceMemoryProperties2(
+    VkPhysicalDevice physicalDevice,
+    VkPhysicalDeviceMemoryProperties2* pMemoryProperties
+) {
+    vkGetPhysicalDeviceMemoryProperties(
+        physicalDevice, &pMemoryProperties->memoryProperties
+    );
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceBufferMemoryRequirements(
+    VkDevice device,
+    const VkDeviceBufferMemoryRequirements* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    auto info = pInfo->pCreateInfo;
+    pMemoryRequirements->memoryRequirements =
+        get_memory_requirements(info->size, info->usage);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageMemoryRequirements(
+    VkDevice device,
+    const VkDeviceImageMemoryRequirements* pInfo,
+    VkMemoryRequirements2* pMemoryRequirements
+) {
+    auto info = pInfo->pCreateInfo;
+    pMemoryRequirements->memoryRequirements = get_memory_requirements(
+        info->extent.width * info->extent.height * info->extent.depth * 4, 
+        info->usage
+    );
+}
