@@ -202,6 +202,7 @@ struct VkPipeline_T {
 };
 
 struct VkCommandBuffer_T {
+    VkCommandBuffer_T* buffer_previous = nullptr;
     std::unique_ptr<VkCommandBuffer_T> buffer_next;
     VkImage_T* current_resolve_image = nullptr;
 
@@ -411,13 +412,22 @@ VKAPI_ATTR VkResult VKAPI_CALL vkFlushMappedMemoryRanges(
         auto internal = (VkDeviceMemory_T*)range.memory;
         auto binding_point = 
             memory_types[internal->memory_index].default_binding;
-        glBindBuffer(
-            binding_point, internal->buffer_object
-        );
-        glBufferSubData(
-            binding_point, range.offset, range.size,
-            internal->mapping.get() + range.offset
-        );
+        if (binding_point == GL_TEXTURE_2D) {
+            fprintf(stderr, "Write to image not supported");
+            // TODO: maybe call glTexSubImage2D in this case.
+            // TODO: binding_point seems to be GL_ARRAY_BUFFER for images 
+            // created with vmaCreateImage, no idea why.
+        } else if (binding_point == GL_ARRAY_BUFFER){
+            glBindBuffer(
+                binding_point, internal->buffer_object
+            );
+            glBufferSubData(
+                binding_point, range.offset, range.size,
+                internal->mapping.get() + range.offset
+            );
+        } else {
+            fprintf(stderr, "Write not supported for memory type");
+        }
     }
     return VK_SUCCESS;
 }
@@ -1088,15 +1098,30 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(
     const VkCommandBufferAllocateInfo* pAllocateInfo,
     VkCommandBuffer* pCommandBuffers
 ) {
+    VkCommandPool_T& pool = *(VkCommandPool_T*)pAllocateInfo->commandPool;
     for (unsigned i = 0; i < pAllocateInfo->commandBufferCount; ++i) {
         auto buffer = std::make_unique<VkCommandBuffer_T>();
-        buffer->buffer_next = 
-            std::move(((VkCommandPool_T*)pAllocateInfo->commandPool)->buffers);
+        buffer->buffer_next = std::move(pool.buffers);
+        buffer->buffer_next->buffer_previous = buffer.get();
         pCommandBuffers[i] = buffer.get();
-        ((VkCommandPool_T*)pAllocateInfo->commandPool)->buffers = 
-            std::move(buffer);
+        pool.buffers = std::move(buffer);
     }
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkFreeCommandBuffers(
+    VkDevice device,
+    VkCommandPool commandPool,
+    uint32_t commandBufferCount,
+    const VkCommandBuffer* pCommandBuffers
+) {
+    VkCommandPool_T& pool = *(VkCommandPool_T*)commandPool;
+    for (unsigned i = 0; i < commandBufferCount; i++) {
+        VkCommandBuffer_T& buffer = *(VkCommandBuffer_T*)pCommandBuffers[i];
+        buffer.buffer_next->buffer_previous = buffer.buffer_previous;
+        if (buffer.buffer_previous)
+            buffer.buffer_previous->buffer_next = std::move(buffer.buffer_next);
+    }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkBeginCommandBuffer(
@@ -1162,7 +1187,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindPipeline(
 
     if (
         !commandBuffer->gl_state.program_set ||
-        program != pipeline_data->p.program
+        program != commandBuffer->gl_state.p.program
     ) {
         add_command(commandBuffer, [=](){
             glUseProgram(program);
