@@ -69,6 +69,8 @@ format_info gl_format(VkFormat format) {
         return {GL_RG32F, 2, GL_RG, GL_FLOAT, false};
     case VK_FORMAT_R8G8B8A8_SRGB: 
         return {GL_SRGB8_ALPHA8, 4, GL_RGBA, GL_UNSIGNED_BYTE, false};
+    case VK_FORMAT_R8_UNORM:
+        return {GL_R8, 1, GL_RED, GL_UNSIGNED_BYTE, true};
     default:
         fprintf(stderr, "Unknown format %i\n", format);
         return {GL_R8, 1, GL_FLOAT, false};
